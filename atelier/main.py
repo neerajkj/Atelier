@@ -38,7 +38,43 @@ class C:
     BOLD_BLUE = "\033[1;34m"
 
 
-def render_statusbar(model, provider, prompt_tokens, context_window, session_tokens):
+def format_display_path(path: str) -> str:
+    home = os.path.expanduser("~")
+    abs_path = os.path.abspath(path)
+    if abs_path == home:
+        return "~"
+    elif abs_path.startswith(home + os.sep):
+        return "~/" + os.path.relpath(abs_path, home)
+    return abs_path
+
+
+def resolve_safe_path(requested_path: str, workdir: str) -> str:
+    if not requested_path:
+        raise ValueError("File path cannot be empty.")
+
+    base_dir = os.path.abspath(os.path.expanduser(workdir))
+    expanded_path = os.path.expanduser(requested_path)
+
+    if not os.path.isabs(expanded_path):
+        target_path = os.path.abspath(os.path.join(base_dir, expanded_path))
+    else:
+        target_path = os.path.abspath(expanded_path)
+
+    try:
+        common = os.path.commonpath([base_dir, target_path])
+        if common != base_dir:
+            raise PermissionError(
+                f"Access denied: '{requested_path}' escapes the working directory '{base_dir}'."
+            )
+    except ValueError:
+        raise PermissionError(
+            f"Access denied: '{requested_path}' is on a different drive or invalid path relative to '{base_dir}'."
+        )
+
+    return target_path
+
+
+def render_statusbar(model, provider, prompt_tokens, context_window, session_tokens, workdir=None):
     import shutil
     try:
         cols = shutil.get_terminal_size((80, 20)).columns
@@ -68,13 +104,18 @@ def render_statusbar(model, provider, prompt_tokens, context_window, session_tok
         prov_str = f"{C.BOLD_BLUE}● Cloud{C.RESET}"
 
     sep = f"{C.DIM}│{C.RESET}"
-    bar_content = f" {C.BOLD_CYAN}🎨 Atelier{C.RESET} {sep} {prov_str} {C.BOLD}{model}{C.RESET} {sep} {context_str} {sep} {C.DIM}Σ Session:{C.RESET} {C.BOLD}{session_tokens:,}{C.RESET}"
-    div_width = min(max(cols - 2, 40), 96)
+    dir_str = f" {sep} {C.DIM}📁{C.RESET} {C.BOLD}{format_display_path(workdir)}{C.RESET}" if workdir else ""
+    bar_content = f" {C.BOLD_CYAN}🎨 Atelier{C.RESET} {sep} {prov_str} {C.BOLD}{model}{C.RESET}{dir_str} {sep} {context_str} {sep} {C.DIM}Σ Session:{C.RESET} {C.BOLD}{session_tokens:,}{C.RESET}"
+    div_width = min(max(cols - 2, 40), 104)
     divider = f"{C.DIM}{'─' * div_width}{C.RESET}"
     print(f"\n{divider}\n{bar_content}\n{divider}", flush=True)
 
 
-def execute_tool(tool_call):
+def execute_tool(tool_call, workdir=None):
+    if workdir is None:
+        workdir = os.getcwd()
+    workdir = os.path.abspath(os.path.expanduser(workdir))
+
     function_name = tool_call.function.name
     try:
         arguments = json.loads(tool_call.function.arguments)
@@ -82,40 +123,55 @@ def execute_tool(tool_call):
         return f"Error parsing arguments: {e}"
 
     if function_name == "Read":
-        file_path = arguments.get("file_path", "")
-        print(f"{C.BLUE}[Tool: Read]{C.RESET} Reading file: {C.BOLD}'{file_path}'{C.RESET}")
+        raw_path = arguments.get("file_path", "")
+        try:
+            file_path = resolve_safe_path(raw_path, workdir)
+        except (PermissionError, ValueError) as e:
+            print(f"{C.RED}[Tool: Read]{C.RESET} Security error: {e}")
+            return f"Security Error: {e}"
+
+        display_path = os.path.relpath(file_path, workdir) if file_path.startswith(workdir) else file_path
+        print(f"{C.BLUE}[Tool: Read]{C.RESET} Reading file: {C.BOLD}'{display_path}'{C.RESET}")
         try:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            print(f"{C.BLUE}[Tool: Read]{C.RESET} Successfully read {len(content):,} characters from '{file_path}'")
+            print(f"{C.BLUE}[Tool: Read]{C.RESET} Successfully read {len(content):,} characters from '{display_path}'")
             return content
         except Exception as e:
-            print(f"{C.RED}[Tool: Read]{C.RESET} Error reading '{file_path}': {e}")
-            return f"Error reading file '{file_path}': {e}"
+            print(f"{C.RED}[Tool: Read]{C.RESET} Error reading '{display_path}': {e}")
+            return f"Error reading file '{raw_path}': {e}"
     elif function_name == "Write":
-        file_path = arguments.get("file_path", "")
+        raw_path = arguments.get("file_path", "")
+        try:
+            file_path = resolve_safe_path(raw_path, workdir)
+        except (PermissionError, ValueError) as e:
+            print(f"{C.RED}[Tool: Write]{C.RESET} Security error: {e}")
+            return f"Security Error: {e}"
+
+        display_path = os.path.relpath(file_path, workdir) if file_path.startswith(workdir) else file_path
         content = arguments.get("content", "")
-        print(f"{C.GREEN}[Tool: Write]{C.RESET} Writing file: {C.BOLD}'{file_path}'{C.RESET} ({len(content):,} characters)")
+        print(f"{C.GREEN}[Tool: Write]{C.RESET} Writing file: {C.BOLD}'{display_path}'{C.RESET} ({len(content):,} characters)")
         try:
             dir_name = os.path.dirname(file_path)
             if dir_name:
                 os.makedirs(dir_name, exist_ok=True)
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(content)
-            print(f"{C.GREEN}[Tool: Write]{C.RESET} Successfully wrote '{file_path}'")
+            print(f"{C.GREEN}[Tool: Write]{C.RESET} Successfully wrote '{display_path}'")
             return ""
         except Exception as e:
-            print(f"{C.RED}[Tool: Write]{C.RESET} Error writing '{file_path}': {e}")
-            return f"Error writing file '{file_path}': {e}"
+            print(f"{C.RED}[Tool: Write]{C.RESET} Error writing '{display_path}': {e}")
+            return f"Error writing file '{raw_path}': {e}"
     elif function_name == "Bash":
         command = arguments.get("command", "")
-        print(f"{C.YELLOW}[Tool: Bash]{C.RESET} Running command: {C.BOLD}'{command}'{C.RESET}")
+        print(f"{C.YELLOW}[Tool: Bash]{C.RESET} Running in {C.BOLD}{format_display_path(workdir)}{C.RESET}: {C.BOLD}'{command}'{C.RESET}")
         try:
             result = subprocess.run(
                 command,
                 shell=True,
                 capture_output=True,
                 text=True,
+                cwd=workdir,
                 timeout=60,
             )
             print(f"{C.YELLOW}[Tool: Bash]{C.RESET} Command completed with exit code {result.returncode}")
@@ -220,6 +276,7 @@ class MockClient:
 def main():
     p = argparse.ArgumentParser(description="Atelier — Minimalist AI Coding Harness")
     p.add_argument("-p", required=False, help="Initial prompt")
+    p.add_argument("-d", "--dir", "--workdir", default=os.getcwd(), help="Target working directory for file operations and commands (default: current directory)")
     p.add_argument("--mock", "--dry-run", dest="mock", action="store_true", help="Run in zero-model mock mode for instant testing without API or GPU")
     p.add_argument("--local", "--ollama", dest="local", action="store_true", help="Use local Ollama instead of OpenRouter")
     p.add_argument(
@@ -243,6 +300,10 @@ def main():
         help="Maximum context window of the model in tokens (default: auto-detected or 32768 for local / 128000 for cloud)",
     )
     args = p.parse_args()
+
+    workdir = os.path.abspath(os.path.expanduser(args.dir))
+    if not os.path.exists(workdir):
+        os.makedirs(workdir, exist_ok=True)
 
     if args.mock:
         client = MockClient()
@@ -336,7 +397,13 @@ def main():
 }
     ]
 
-    messages = []
+    system_prompt = (
+        f"You are Atelier, a helpful, minimalist, and precise AI coding assistant.\n"
+        f"Working Directory: {workdir}\n"
+        f"All file reads, writes, and shell commands are strictly confined to this working directory. "
+        f"Always use relative file paths from this directory."
+    )
+    messages = [{"role": "system", "content": system_prompt}]
     initial_prompt = args.p
     session_prompt_tokens = 0
     session_completion_tokens = 0
@@ -349,7 +416,7 @@ def main():
     else:
         provider_badge = f"{C.BOLD_BLUE}Cloud (OpenRouter){C.RESET}"
 
-    print(f"\n🎨 {C.BOLD_CYAN}Atelier{C.RESET} — AI Coding Harness [{provider_badge} | {C.BOLD}{model}{C.RESET}]", flush=True)
+    print(f"\n🎨 {C.BOLD_CYAN}Atelier{C.RESET} — AI Coding Harness [{provider_badge} | {C.BOLD}{model}{C.RESET} | {C.DIM}📁 {format_display_path(workdir)}{C.RESET}]", flush=True)
     print(f"{C.DIM}Type your prompt or 'exit' to quit.{C.RESET}", flush=True)
 
     while True:
@@ -364,6 +431,7 @@ def main():
                 prompt_tokens=last_prompt_tokens,
                 context_window=context_window,
                 session_tokens=session_prompt_tokens + session_completion_tokens,
+                workdir=workdir,
             )
             try:
                 user_prompt = input(f"{C.BOLD_CYAN}atelier ❯{C.RESET} ").strip()
@@ -443,7 +511,7 @@ def main():
                 print(f"\n{C.BOLD_MAGENTA}[Model Response]{C.RESET} {C.MAGENTA}Requested {len(tool_calls)} tool call(s):{C.RESET}")
                 for tool_call in tool_calls:
                     print(f"  • {C.BOLD}Tool:{C.RESET} {C.BOLD_CYAN}{tool_call.function.name}{C.RESET} | {C.DIM}ID: {tool_call.id}{C.RESET} | {C.DIM}Args: {tool_call.function.arguments}{C.RESET}")
-                    result = execute_tool(tool_call)
+                    result = execute_tool(tool_call, workdir=workdir)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,

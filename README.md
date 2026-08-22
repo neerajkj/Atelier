@@ -81,6 +81,12 @@ Run tests and try the UI without any API key or GPU:
 uv run -m unittest discover tests
 ```
 
+### 4. Specifying a Target Working Directory
+Confine all file reads, writes, and shell execution to a specific project directory:
+```bash
+./atelier.sh -d /path/to/my-project --local -m qwen2.5-coder:7b
+```
+
 ---
 
 ## Options & Flags
@@ -91,6 +97,7 @@ uv run -m unittest discover tests
 options:
   -h, --help            Show help message and exit
   -p P                  Initial prompt
+  -d, --dir, --workdir  Target working directory (default: current directory)
   --mock, --dry-run     Run in zero-model mock mode for instant testing without API or GPU
   --local, --ollama     Use local Ollama instead of OpenRouter
   -m, --model MODEL     Model name (default: qwen2.5-coder:7b for local)
