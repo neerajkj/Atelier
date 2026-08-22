@@ -95,6 +95,23 @@ By default, Atelier prompts for confirmation before running any shell command or
 
 ---
 
+## Interactive Slash Commands
+
+Inside the interactive REPL, you can control Atelier dynamically:
+
+| Command | Description |
+| :--- | :--- |
+| `/help` | List all available slash commands and usage |
+| `/model [name]` | View or switch active LLM model on the fly |
+| `/cd [path]` | Change active working directory without restarting |
+| `/clear` | Clear conversation history and reset context window to 0 tokens |
+| `/stats` | View active context token usage, model info, and session odometer |
+| `/approve` | Toggle auto-approve mode for bash commands and file overwrites |
+| `/tools` | List registered tools and schema summaries |
+| `/exit` | Exit the session cleanly |
+
+---
+
 ## Options & Flags
 
 ```text

@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass, field
 
 from openai import OpenAI
 
@@ -235,6 +236,152 @@ def execute_tool(tool_call, workdir=None, auto_approve=False):
     return ""
 
 
+@dataclass
+class SessionState:
+    model: str
+    provider: str
+    workdir: str
+    context_window: int
+    session_prompt_tokens: int = 0
+    session_completion_tokens: int = 0
+    last_prompt_tokens: int = 0
+    messages: list = field(default_factory=list)
+    auto_approve: bool = False
+    should_exit: bool = False
+
+
+COMMAND_REGISTRY = {}
+
+
+def register_command(names, description: str, usage: str = ""):
+    def decorator(func):
+        name_list = [names] if isinstance(names, str) else names
+        primary_name = name_list[0].lower()
+        if not primary_name.startswith("/"):
+            primary_name = "/" + primary_name
+
+        info = {
+            "func": func,
+            "description": description,
+            "usage": usage or primary_name,
+            "aliases": name_list,
+        }
+        for n in name_list:
+            cmd = n.lower()
+            if not cmd.startswith("/"):
+                cmd = "/" + cmd
+            COMMAND_REGISTRY[cmd] = info
+        return func
+    return decorator
+
+
+@register_command(["/help", "/h", "/?"], "List all available slash commands", usage="/help")
+def cmd_help(state: SessionState, args: str):
+    print(f"\n{C.BOLD_CYAN}Available Slash Commands:{C.RESET}")
+    seen = set()
+    for cmd, info in sorted(COMMAND_REGISTRY.items()):
+        if info["usage"] not in seen:
+            seen.add(info["usage"])
+            print(f"  {C.BOLD}{info['usage']:<22}{C.RESET} {C.DIM}— {info['description']}{C.RESET}")
+    print()
+
+
+@register_command(["/exit", "/quit", "/q"], "Exit Atelier session", usage="/exit")
+def cmd_exit(state: SessionState, args: str):
+    state.should_exit = True
+    print(f"{C.DIM}Goodbye!{C.RESET}")
+
+
+@register_command(["/clear", "/reset"], "Clear conversation history and reset context window", usage="/clear")
+def cmd_clear(state: SessionState, args: str):
+    state.messages = [m for m in state.messages if isinstance(m, dict) and m.get("role") == "system"]
+    state.last_prompt_tokens = 0
+    print(f"{C.GREEN}✓ Conversation history cleared. Context reset to 0 tokens.{C.RESET}\n")
+
+
+@register_command(["/model", "/m"], "View or switch active LLM model", usage="/model [name]")
+def cmd_model(state: SessionState, args: str):
+    new_model = args.strip()
+    if not new_model:
+        print(f"\nActive Model: {C.BOLD}{state.model}{C.RESET} ({state.provider}) | Context Limit: {state.context_window:,} tokens\n")
+        return
+    state.model = new_model
+    if "32k" in new_model or "qwen2.5-coder:7b" in new_model:
+        state.context_window = 32768
+    elif "qwen3:8b" in new_model:
+        state.context_window = 40960
+    elif "claude" in new_model:
+        state.context_window = 200000
+    elif "gemini" in new_model:
+        state.context_window = 1000000
+    print(f"{C.GREEN}✓ Switched active model to:{C.RESET} {C.BOLD}{state.model}{C.RESET} (Context Limit: {state.context_window:,} tokens)\n")
+
+
+@register_command(["/cd", "/dir"], "View or change the working directory", usage="/cd [path]")
+def cmd_cd(state: SessionState, args: str):
+    target = args.strip()
+    if not target:
+        print(f"\nWorking Directory: {C.BOLD}{state.workdir}{C.RESET}\n")
+        return
+    resolved = os.path.abspath(os.path.expanduser(target))
+    if not os.path.isdir(resolved):
+        print(f"{C.RED}Error: Directory does not exist: '{resolved}'{C.RESET}\n")
+        return
+    state.workdir = resolved
+    # Update system message
+    for m in state.messages:
+        if isinstance(m, dict) and m.get("role") == "system":
+            m["content"] = (
+                f"You are Atelier, a helpful, minimalist, and precise AI coding assistant.\n"
+                f"Working Directory: {state.workdir}\n"
+                f"All file reads, writes, and shell commands are strictly confined to this working directory. "
+                f"Always use relative file paths from this directory."
+            )
+    print(f"{C.GREEN}✓ Working directory changed to:{C.RESET} {C.BOLD}{format_display_path(resolved)}{C.RESET}\n")
+
+
+@register_command(["/stats", "/context"], "Show session token stats and context utilization", usage="/stats")
+def cmd_stats(state: SessionState, args: str):
+    total_session = state.session_prompt_tokens + state.session_completion_tokens
+    pct = (state.last_prompt_tokens / state.context_window * 100) if state.context_window > 0 else 0
+    print(f"\n{C.BOLD_CYAN}Session Statistics & Metrics:{C.RESET}")
+    print(f"  • {C.BOLD}Model:{C.RESET}               {state.model} ({state.provider})")
+    print(f"  • {C.BOLD}Working Directory:{C.RESET}   {format_display_path(state.workdir)}")
+    print(f"  • {C.BOLD}Context Used:{C.RESET}        {state.last_prompt_tokens:,} / {state.context_window:,} tokens ({pct:.2f}%)")
+    print(f"  • {C.BOLD}Session Total:{C.RESET}       {total_session:,} tokens (Prompt: {state.session_prompt_tokens:,} | Completion: {state.session_completion_tokens:,})")
+    print(f"  • {C.BOLD}Auto-Approve:{C.RESET}        {'Enabled (bypasses confirmation)' if state.auto_approve else 'Disabled (prompts before write/bash)'}\n")
+
+
+@register_command(["/approve", "/auto"], "Toggle auto-approve mode for commands & overwrites", usage="/approve")
+def cmd_approve(state: SessionState, args: str):
+    state.auto_approve = not state.auto_approve
+    status_str = f"{C.BOLD_GREEN}ENABLED{C.RESET}" if state.auto_approve else f"{C.BOLD_YELLOW}DISABLED{C.RESET}"
+    print(f"\nAuto-Approve mode is now {status_str}.\n")
+
+
+@register_command(["/tools"], "List available agent tools and descriptions", usage="/tools")
+def cmd_tools(state: SessionState, args: str):
+    print(f"\n{C.BOLD_CYAN}Registered Agent Tools:{C.RESET}")
+    print(f"  • {C.BOLD}Read:{C.RESET}  Reads file contents safely within working directory.")
+    print(f"  • {C.BOLD}Write:{C.RESET} Writes or updates files (prompts before overwriting).")
+    print(f"  • {C.BOLD}Bash:{C.RESET}  Executes shell commands with cwd confined to working directory.\n")
+
+
+def dispatch_slash_command(user_input: str, state: SessionState) -> bool:
+    if not user_input.startswith("/"):
+        return False
+    parts = user_input.split(" ", 1)
+    cmd = parts[0].lower()
+    args = parts[1].strip() if len(parts) > 1 else ""
+
+    if cmd in COMMAND_REGISTRY:
+        COMMAND_REGISTRY[cmd]["func"](state, args)
+        return True
+    else:
+        print(f"{C.RED}Unknown command: '{cmd}'. Type {C.BOLD}/help{C.RESET}{C.RED} to see available commands.{C.RESET}\n")
+        return True
+
+
 class MockChatChoice:
     def __init__(self, message):
         self.message = message
@@ -456,9 +603,16 @@ def main():
     )
     messages = [{"role": "system", "content": system_prompt}]
     initial_prompt = args.p
-    session_prompt_tokens = 0
-    session_completion_tokens = 0
-    last_prompt_tokens = 0
+
+    provider_type = "mock" if args.mock else ("local" if args.local else "cloud")
+    state = SessionState(
+        model=model,
+        provider=provider_type,
+        workdir=workdir,
+        context_window=context_window,
+        messages=messages,
+        auto_approve=args.auto_approve,
+    )
 
     if args.mock:
         provider_badge = f"{C.BOLD_MAGENTA}Mock (Zero-Model){C.RESET}"
@@ -467,22 +621,21 @@ def main():
     else:
         provider_badge = f"{C.BOLD_BLUE}Cloud (OpenRouter){C.RESET}"
 
-    print(f"\n🎨 {C.BOLD_CYAN}Atelier{C.RESET} — AI Coding Harness [{provider_badge} | {C.BOLD}{model}{C.RESET} | {C.DIM}📁 {format_display_path(workdir)}{C.RESET}]", flush=True)
-    print(f"{C.DIM}Type your prompt or 'exit' to quit.{C.RESET}", flush=True)
+    print(f"\n🎨 {C.BOLD_CYAN}Atelier{C.RESET} — AI Coding Harness [{provider_badge} | {C.BOLD}{state.model}{C.RESET} | {C.DIM}📁 {format_display_path(state.workdir)}{C.RESET}]", flush=True)
+    print(f"{C.DIM}Type your prompt, '/help' for commands, or 'exit' to quit.{C.RESET}", flush=True)
 
     while True:
         if initial_prompt:
             user_prompt = initial_prompt
             initial_prompt = None
         else:
-            provider_type = "mock" if args.mock else ("local" if args.local else "cloud")
             render_statusbar(
-                model=model,
-                provider=provider_type,
-                prompt_tokens=last_prompt_tokens,
-                context_window=context_window,
-                session_tokens=session_prompt_tokens + session_completion_tokens,
-                workdir=workdir,
+                model=state.model,
+                provider=state.provider,
+                prompt_tokens=state.last_prompt_tokens,
+                context_window=state.context_window,
+                session_tokens=state.session_prompt_tokens + state.session_completion_tokens,
+                workdir=state.workdir,
             )
             try:
                 user_prompt = input(f"{C.BOLD_CYAN}atelier ❯{C.RESET} ").strip()
@@ -490,18 +643,22 @@ def main():
                 print(f"\n{C.DIM}Goodbye!{C.RESET}")
                 break
 
-            if not user_prompt or user_prompt.lower() in ("exit", "quit", "q"):
-                print(f"{C.DIM}Goodbye!{C.RESET}")
-                break
+            if not user_prompt:
+                continue
 
-        messages.append({"role": "user", "content": user_prompt})
+            if dispatch_slash_command(user_prompt, state):
+                if state.should_exit:
+                    break
+                continue
+
+        state.messages.append({"role": "user", "content": user_prompt})
 
         # Agent Loop: call model and execute tools until final text answer is produced
         try:
             while True:
                 params = {
-                    "model": model,
-                    "messages": messages,
+                    "model": state.model,
+                    "messages": state.messages,
                     "tools": tools,
                 }
                 if args.max_tokens is not None:
@@ -513,17 +670,17 @@ def main():
                     raise RuntimeError("no choices in response")
 
                 if chat.usage:
-                    last_prompt_tokens = chat.usage.prompt_tokens
-                    session_prompt_tokens += chat.usage.prompt_tokens
-                    session_completion_tokens += chat.usage.completion_tokens
-                    context_pct = (chat.usage.prompt_tokens / context_window) * 100
+                    state.last_prompt_tokens = chat.usage.prompt_tokens
+                    state.session_prompt_tokens += chat.usage.prompt_tokens
+                    state.session_completion_tokens += chat.usage.completion_tokens
+                    context_pct = (chat.usage.prompt_tokens / state.context_window) * 100
                     pct_color = C.GREEN if context_pct < 50 else (C.YELLOW if context_pct < 80 else C.RED)
                     print(
                         f"\n{C.DIM}┌─ [Context & Tokens]{C.RESET} "
-                        f"Context: {C.BOLD}{chat.usage.prompt_tokens:,}{C.RESET}/{context_window:,} ({pct_color}{context_pct:.2f}%{C.RESET}) | "
+                        f"Context: {C.BOLD}{chat.usage.prompt_tokens:,}{C.RESET}/{state.context_window:,} ({pct_color}{context_pct:.2f}%{C.RESET}) | "
                         f"Gen: {C.BOLD}{chat.usage.completion_tokens:,}{C.RESET} | "
                         f"Turn: {chat.usage.total_tokens:,} | "
-                        f"Session: {session_prompt_tokens + session_completion_tokens:,}",
+                        f"Session: {state.session_prompt_tokens + state.session_completion_tokens:,}",
                         flush=True
                     )
 
@@ -552,18 +709,18 @@ def main():
                         except Exception:
                             pass
 
-                messages.append(response_message)
+                state.messages.append(response_message)
 
                 if not tool_calls:
                     if response_message.content:
-                        print(f"\n{C.BOLD_GREEN}🤖 {model}:{C.RESET}\n{response_message.content}", flush=True)
+                        print(f"\n{C.BOLD_GREEN}🤖 {state.model}:{C.RESET}\n{response_message.content}", flush=True)
                     break
 
                 print(f"\n{C.BOLD_MAGENTA}[Model Response]{C.RESET} {C.MAGENTA}Requested {len(tool_calls)} tool call(s):{C.RESET}")
                 for tool_call in tool_calls:
                     print(f"  • {C.BOLD}Tool:{C.RESET} {C.BOLD_CYAN}{tool_call.function.name}{C.RESET} | {C.DIM}ID: {tool_call.id}{C.RESET} | {C.DIM}Args: {tool_call.function.arguments}{C.RESET}")
-                    result = execute_tool(tool_call, workdir=workdir, auto_approve=args.auto_approve)
-                    messages.append({
+                    result = execute_tool(tool_call, workdir=state.workdir, auto_approve=state.auto_approve)
+                    state.messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": result,
@@ -571,13 +728,13 @@ def main():
         except KeyboardInterrupt:
             print(f"\n{C.YELLOW}[Interrupted]{C.RESET} Operation cancelled by user.", flush=True)
             # Remove incomplete user prompt from history
-            if messages and hasattr(messages[-1], "get") and messages[-1].get("role") == "user":
-                messages.pop()
+            if state.messages and hasattr(state.messages[-1], "get") and state.messages[-1].get("role") == "user":
+                state.messages.pop()
             continue
         except Exception as e:
             print(f"\n{C.RED}[Error]{C.RESET} {e}", flush=True)
-            if messages and hasattr(messages[-1], "get") and messages[-1].get("role") == "user":
-                messages.pop()
+            if state.messages and hasattr(state.messages[-1], "get") and state.messages[-1].get("role") == "user":
+                state.messages.pop()
             continue
 
 

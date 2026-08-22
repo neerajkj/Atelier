@@ -3,7 +3,15 @@ import os
 import shutil
 import tempfile
 import unittest
-from atelier.main import execute_tool, resolve_safe_path, MockClient
+from atelier.main import (
+    execute_tool,
+    resolve_safe_path,
+    MockClient,
+    SessionState,
+    dispatch_slash_command,
+    COMMAND_REGISTRY,
+    register_command,
+)
 
 
 class DummyToolCall:
@@ -109,6 +117,67 @@ class TestAtelierSandbox(unittest.TestCase):
         self.assertEqual(len(resp.choices), 1)
         self.assertTrue(resp.choices[0].message.tool_calls is not None)
         self.assertEqual(resp.choices[0].message.tool_calls[0].function.name, "Read")
+
+    def test_slash_command_exit(self):
+        state = SessionState(model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        handled = dispatch_slash_command("/exit", state)
+        self.assertTrue(handled)
+        self.assertTrue(state.should_exit)
+
+    def test_slash_command_model_switch(self):
+        state = SessionState(model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
+        handled = dispatch_slash_command("/model claude-3-5-sonnet", state)
+        self.assertTrue(handled)
+        self.assertEqual(state.model, "claude-3-5-sonnet")
+        self.assertEqual(state.context_window, 200000)
+
+    def test_slash_command_cd(self):
+        sub_dir = os.path.join(self.test_dir, "sub_folder")
+        os.makedirs(sub_dir, exist_ok=True)
+        state = SessionState(model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        handled = dispatch_slash_command(f"/cd {sub_dir}", state)
+        self.assertTrue(handled)
+        self.assertEqual(state.workdir, sub_dir)
+
+    def test_slash_command_clear(self):
+        state = SessionState(
+            model="test-m",
+            provider="mock",
+            workdir=self.test_dir,
+            context_window=32768,
+            messages=[
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+            ],
+            last_prompt_tokens=500,
+        )
+        handled = dispatch_slash_command("/clear", state)
+        self.assertTrue(handled)
+        self.assertEqual(len(state.messages), 1)
+        self.assertEqual(state.messages[0]["role"], "system")
+        self.assertEqual(state.last_prompt_tokens, 0)
+
+    def test_slash_command_approve_toggle(self):
+        state = SessionState(model="test-m", provider="mock", workdir=self.test_dir, context_window=32768, auto_approve=False)
+        handled = dispatch_slash_command("/approve", state)
+        self.assertTrue(handled)
+        self.assertTrue(state.auto_approve)
+
+    def test_slash_command_custom_extensibility(self):
+        @register_command("/custom_ping", "Custom ping test command")
+        def cmd_ping(state: SessionState, args: str):
+            state.model = "pinged"
+
+        state = SessionState(model="original", provider="mock", workdir=self.test_dir, context_window=32768)
+        handled = dispatch_slash_command("/custom_ping", state)
+        self.assertTrue(handled)
+        self.assertEqual(state.model, "pinged")
+
+    def test_slash_command_non_slash_input(self):
+        state = SessionState(model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        handled = dispatch_slash_command("Read pyproject.toml", state)
+        self.assertFalse(handled)
 
 
 if __name__ == "__main__":
