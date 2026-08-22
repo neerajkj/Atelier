@@ -68,6 +68,19 @@ echo "OPENROUTER_API_KEY=your_key_here" > .env
 ./atelier.sh --local -m qwen2.5-coder:7b -p "Write a python script called math_utils.py with add and multiply functions"
 ```
 
+### 3. Zero-Model Testing Mode (Instant / Offline)
+Run tests and try the UI without any API key or GPU:
+```bash
+# Interactive mock mode
+./atelier.sh --mock
+
+# Single prompt mock test
+./atelier.sh --mock -p "Read pyproject.toml"
+
+# Run automated unit test suite
+uv run -m unittest discover tests
+```
+
 ---
 
 ## Options & Flags
@@ -78,8 +91,9 @@ echo "OPENROUTER_API_KEY=your_key_here" > .env
 options:
   -h, --help            Show help message and exit
   -p P                  Initial prompt
+  --mock, --dry-run     Run in zero-model mock mode for instant testing without API or GPU
   --local, --ollama     Use local Ollama instead of OpenRouter
-  -m, --model MODEL     Model name
+  -m, --model MODEL     Model name (default: qwen2.5-coder:7b for local)
   --base-url BASE_URL   Custom API Base URL
   --max-tokens N        Max tokens to generate per response (default: 1024)
   --context-window N    Model max context window limit in tokens
