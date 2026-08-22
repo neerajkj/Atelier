@@ -111,7 +111,28 @@ def render_statusbar(model, provider, prompt_tokens, context_window, session_tok
     print(f"\n{divider}\n{bar_content}\n{divider}", flush=True)
 
 
-def execute_tool(tool_call, workdir=None):
+def ask_permission(action_type: str, details: list[tuple[str, str]], auto_approve: bool = False) -> bool:
+    if auto_approve:
+        return True
+
+    print(f"\n{C.BOLD_YELLOW}⚠️  [Permission Required] {action_type}{C.RESET}")
+    for label, val in details:
+        print(f"   {C.DIM}{label}:{C.RESET} {C.BOLD}{val}{C.RESET}")
+
+    try:
+        choice = input(f"{C.BOLD_YELLOW}Allow action? [y/N]:{C.RESET} ").strip().lower()
+        allowed = choice in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        allowed = False
+
+    if not allowed:
+        print(f"{C.RED}✗ Action rejected by user.{C.RESET}\n", flush=True)
+    else:
+        print(f"{C.GREEN}✓ Approved.{C.RESET}\n", flush=True)
+    return allowed
+
+
+def execute_tool(tool_call, workdir=None, auto_approve=False):
     if workdir is None:
         workdir = os.getcwd()
     workdir = os.path.abspath(os.path.expanduser(workdir))
@@ -150,6 +171,24 @@ def execute_tool(tool_call, workdir=None):
 
         display_path = os.path.relpath(file_path, workdir) if file_path.startswith(workdir) else file_path
         content = arguments.get("content", "")
+
+        # Check if file exists and ask for permission before overwriting
+        if os.path.exists(file_path):
+            existing_size = os.path.getsize(file_path)
+            new_size = len(content.encode("utf-8"))
+            allowed = ask_permission(
+                "Overwrite Existing File?",
+                [
+                    ("Target File", file_path),
+                    ("Relative Path", display_path),
+                    ("Existing Size", f"{existing_size:,} bytes"),
+                    ("New Size", f"{new_size:,} bytes"),
+                ],
+                auto_approve=auto_approve,
+            )
+            if not allowed:
+                return f"Permission Denied: User declined to overwrite file '{raw_path}'."
+
         print(f"{C.GREEN}[Tool: Write]{C.RESET} Writing file: {C.BOLD}'{display_path}'{C.RESET} ({len(content):,} characters)")
         try:
             dir_name = os.path.dirname(file_path)
@@ -164,7 +203,18 @@ def execute_tool(tool_call, workdir=None):
             return f"Error writing file '{raw_path}': {e}"
     elif function_name == "Bash":
         command = arguments.get("command", "")
-        print(f"{C.YELLOW}[Tool: Bash]{C.RESET} Running in {C.BOLD}{format_display_path(workdir)}{C.RESET}: {C.BOLD}'{command}'{C.RESET}")
+        allowed = ask_permission(
+            "Execute Shell Command?",
+            [
+                ("Command", command),
+                ("Working Directory", file_path_dir := format_display_path(workdir)),
+            ],
+            auto_approve=auto_approve,
+        )
+        if not allowed:
+            return f"Permission Denied: User declined to execute command: '{command}'."
+
+        print(f"{C.YELLOW}[Tool: Bash]{C.RESET} Running in {C.BOLD}{file_path_dir}{C.RESET}: {C.BOLD}'{command}'{C.RESET}")
         try:
             result = subprocess.run(
                 command,
@@ -277,6 +327,7 @@ def main():
     p = argparse.ArgumentParser(description="Atelier — Minimalist AI Coding Harness")
     p.add_argument("-p", required=False, help="Initial prompt")
     p.add_argument("-d", "--dir", "--workdir", default=os.getcwd(), help="Target working directory for file operations and commands (default: current directory)")
+    p.add_argument("-y", "--yes", "--auto-approve", dest="auto_approve", action="store_true", help="Automatically approve shell commands and file overwrites without prompting")
     p.add_argument("--mock", "--dry-run", dest="mock", action="store_true", help="Run in zero-model mock mode for instant testing without API or GPU")
     p.add_argument("--local", "--ollama", dest="local", action="store_true", help="Use local Ollama instead of OpenRouter")
     p.add_argument(
@@ -511,7 +562,7 @@ def main():
                 print(f"\n{C.BOLD_MAGENTA}[Model Response]{C.RESET} {C.MAGENTA}Requested {len(tool_calls)} tool call(s):{C.RESET}")
                 for tool_call in tool_calls:
                     print(f"  • {C.BOLD}Tool:{C.RESET} {C.BOLD_CYAN}{tool_call.function.name}{C.RESET} | {C.DIM}ID: {tool_call.id}{C.RESET} | {C.DIM}Args: {tool_call.function.arguments}{C.RESET}")
-                    result = execute_tool(tool_call, workdir=workdir)
+                    result = execute_tool(tool_call, workdir=workdir, auto_approve=args.auto_approve)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,

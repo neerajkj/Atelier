@@ -87,6 +87,12 @@ Confine all file reads, writes, and shell execution to a specific project direct
 ./atelier.sh -d /path/to/my-project --local -m qwen2.5-coder:7b
 ```
 
+### 5. Non-Interactive / Auto-Approve Mode
+By default, Atelier prompts for confirmation before running any shell command or overwriting an existing file. Use `-y` to auto-approve:
+```bash
+./atelier.sh -y -d /path/to/my-project --local -m qwen2.5-coder:7b
+```
+
 ---
 
 ## Options & Flags
@@ -98,6 +104,7 @@ options:
   -h, --help            Show help message and exit
   -p P                  Initial prompt
   -d, --dir, --workdir  Target working directory (default: current directory)
+  -y, --yes             Auto-approve shell commands and file overwrites without prompting
   --mock, --dry-run     Run in zero-model mock mode for instant testing without API or GPU
   --local, --ollama     Use local Ollama instead of OpenRouter
   -m, --model MODEL     Model name (default: qwen2.5-coder:7b for local)

@@ -57,9 +57,51 @@ class TestAtelierSandbox(unittest.TestCase):
 
     def test_tool_bash_cwd_confinement(self):
         call = DummyToolCall("Bash", {"command": "pwd"})
-        res = execute_tool(call, workdir=self.test_dir)
+        res = execute_tool(call, workdir=self.test_dir, auto_approve=True)
         # Verify pwd output matches real test_dir
         self.assertEqual(os.path.realpath(res.strip()), os.path.realpath(self.test_dir))
+
+    def test_tool_write_overwrite_permission_denied(self):
+        # Create initial file
+        target = os.path.join(self.test_dir, "existing.txt")
+        with open(target, "w") as f:
+            f.write("original content")
+
+        write_call = DummyToolCall("Write", {"file_path": "existing.txt", "content": "overwritten content"})
+        
+        # Simulate user typing 'n' to deny permission
+        from unittest.mock import patch
+        with patch("builtins.input", return_value="n"):
+            res = execute_tool(write_call, workdir=self.test_dir, auto_approve=False)
+
+        self.assertIn("Permission Denied", res)
+        # Verify content was NOT overwritten
+        with open(target, "r") as f:
+            self.assertEqual(f.read(), "original content")
+
+    def test_tool_write_overwrite_approved(self):
+        target = os.path.join(self.test_dir, "existing.txt")
+        with open(target, "w") as f:
+            f.write("original content")
+
+        write_call = DummyToolCall("Write", {"file_path": "existing.txt", "content": "overwritten content"})
+        res = execute_tool(write_call, workdir=self.test_dir, auto_approve=True)
+        self.assertEqual(write_res := res, "")
+        with open(target, "r") as f:
+            self.assertEqual(f.read(), "overwritten content")
+
+    def test_tool_bash_permission_denied(self):
+        call = DummyToolCall("Bash", {"command": "echo 'should not run'"})
+        from unittest.mock import patch
+        with patch("builtins.input", return_value="n"):
+            res = execute_tool(call, workdir=self.test_dir, auto_approve=False)
+
+        self.assertIn("Permission Denied", res)
+
+    def test_tool_bash_permission_approved(self):
+        call = DummyToolCall("Bash", {"command": "echo 'allowed run'"})
+        res = execute_tool(call, workdir=self.test_dir, auto_approve=True)
+        self.assertIn("allowed run", res)
 
     def test_mock_client_completion(self):
         client = MockClient()
