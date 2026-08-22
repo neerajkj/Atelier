@@ -38,6 +38,42 @@ class C:
     BOLD_BLUE = "\033[1;34m"
 
 
+def render_statusbar(model, provider, prompt_tokens, context_window, session_tokens):
+    import shutil
+    try:
+        cols = shutil.get_terminal_size((80, 20)).columns
+    except Exception:
+        cols = 80
+
+    if context_window > 0 and prompt_tokens > 0:
+        pct = (prompt_tokens / context_window) * 100
+        filled = int(round(pct / 10))
+        filled = min(max(filled, 0), 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        if pct < 50:
+            meter_color = C.BOLD_GREEN
+        elif pct < 80:
+            meter_color = C.BOLD_YELLOW
+        else:
+            meter_color = C.RED
+        context_str = f"Context: {prompt_tokens:,}/{context_window:,} {meter_color}[{bar}] {pct:.1f}%{C.RESET}"
+    else:
+        context_str = f"Context: 0/{context_window:,} {C.DIM}[░░░░░░░░░░] 0.0%{C.RESET}"
+
+    if provider == "mock":
+        prov_str = f"{C.BOLD_MAGENTA}● Mock{C.RESET}"
+    elif provider == "local":
+        prov_str = f"{C.BOLD_GREEN}● Local{C.RESET}"
+    else:
+        prov_str = f"{C.BOLD_BLUE}● Cloud{C.RESET}"
+
+    sep = f"{C.DIM}│{C.RESET}"
+    bar_content = f" {C.BOLD_CYAN}🎨 Atelier{C.RESET} {sep} {prov_str} {C.BOLD}{model}{C.RESET} {sep} {context_str} {sep} {C.DIM}Σ Session:{C.RESET} {C.BOLD}{session_tokens:,}{C.RESET}"
+    div_width = min(max(cols - 2, 40), 96)
+    divider = f"{C.DIM}{'─' * div_width}{C.RESET}"
+    print(f"\n{divider}\n{bar_content}\n{divider}", flush=True)
+
+
 def execute_tool(tool_call):
     function_name = tool_call.function.name
     try:
@@ -304,6 +340,7 @@ def main():
     initial_prompt = args.p
     session_prompt_tokens = 0
     session_completion_tokens = 0
+    last_prompt_tokens = 0
 
     if args.mock:
         provider_badge = f"{C.BOLD_MAGENTA}Mock (Zero-Model){C.RESET}"
@@ -313,21 +350,23 @@ def main():
         provider_badge = f"{C.BOLD_BLUE}Cloud (OpenRouter){C.RESET}"
 
     print(f"\n🎨 {C.BOLD_CYAN}Atelier{C.RESET} — AI Coding Harness [{provider_badge} | {C.BOLD}{model}{C.RESET}]", flush=True)
-    print(f"{C.DIM}Type your prompt or 'exit' to quit.{C.RESET}\n", flush=True)
+    print(f"{C.DIM}Type your prompt or 'exit' to quit.{C.RESET}", flush=True)
 
     while True:
         if initial_prompt:
             user_prompt = initial_prompt
             initial_prompt = None
         else:
+            provider_type = "mock" if args.mock else ("local" if args.local else "cloud")
+            render_statusbar(
+                model=model,
+                provider=provider_type,
+                prompt_tokens=last_prompt_tokens,
+                context_window=context_window,
+                session_tokens=session_prompt_tokens + session_completion_tokens,
+            )
             try:
-                if args.mock:
-                    prompt_badge = f"{C.BOLD_MAGENTA}mock{C.RESET}"
-                elif args.local:
-                    prompt_badge = f"{C.BOLD_GREEN}local{C.RESET}"
-                else:
-                    prompt_badge = f"{C.BOLD_BLUE}cloud{C.RESET}"
-                user_prompt = input(f"\n{C.BOLD_CYAN}atelier{C.RESET} [{prompt_badge}:{C.DIM}{model}{C.RESET}] {C.BOLD_CYAN}❯{C.RESET} ").strip()
+                user_prompt = input(f"{C.BOLD_CYAN}atelier ❯{C.RESET} ").strip()
             except (EOFError, KeyboardInterrupt):
                 print(f"\n{C.DIM}Goodbye!{C.RESET}")
                 break
@@ -355,6 +394,7 @@ def main():
                     raise RuntimeError("no choices in response")
 
                 if chat.usage:
+                    last_prompt_tokens = chat.usage.prompt_tokens
                     session_prompt_tokens += chat.usage.prompt_tokens
                     session_completion_tokens += chat.usage.completion_tokens
                     context_pct = (chat.usage.prompt_tokens / context_window) * 100
