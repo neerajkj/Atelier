@@ -23,25 +23,37 @@ BASE_URL = os.getenv("OPENROUTER_BASE_URL", default="https://openrouter.ai/api/v
 
 def execute_tool(tool_call):
     function_name = tool_call.function.name
-    arguments = json.loads(tool_call.function.arguments)
+    try:
+        arguments = json.loads(tool_call.function.arguments)
+    except Exception as e:
+        return f"Error parsing arguments: {e}"
+
     if function_name == "Read":
-        file_path = arguments.get("file_path")
+        file_path = arguments.get("file_path", "")
         print(f"[Diagnostic] Reading file: '{file_path}'")
-        with open(file_path, "r") as f:
-            content = f.read()
-        print(f"[Diagnostic] Successfully read {len(content)} characters from '{file_path}'")
-        return content
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            print(f"[Diagnostic] Successfully read {len(content)} characters from '{file_path}'")
+            return content
+        except Exception as e:
+            print(f"[Diagnostic] Error reading '{file_path}': {e}")
+            return f"Error reading file '{file_path}': {e}"
     elif function_name == "Write":
-        file_path = arguments.get("file_path")
+        file_path = arguments.get("file_path", "")
         content = arguments.get("content", "")
         print(f"[Diagnostic] Writing file: '{file_path}' ({len(content)} characters)")
-        dir_name = os.path.dirname(file_path)
-        if dir_name:
-            os.makedirs(dir_name, exist_ok=True)
-        with open(file_path, "w") as f:
-            f.write(content)
-        print(f"[Diagnostic] Successfully wrote '{file_path}'")
-        return ""
+        try:
+            dir_name = os.path.dirname(file_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            print(f"[Diagnostic] Successfully wrote '{file_path}'")
+            return ""
+        except Exception as e:
+            print(f"[Diagnostic] Error writing '{file_path}': {e}")
+            return f"Error writing file '{file_path}': {e}"
     elif function_name == "Bash":
         command = arguments.get("command", "")
         print(f"[Diagnostic] Running command: '{command}'")
@@ -51,9 +63,13 @@ def execute_tool(tool_call):
                 shell=True,
                 capture_output=True,
                 text=True,
+                timeout=60,
             )
             print(f"[Diagnostic] Command completed with exit code {result.returncode}")
             return result.stdout + result.stderr
+        except subprocess.TimeoutExpired:
+            print(f"[Diagnostic] Command timed out after 60 seconds")
+            return "Error: Command timed out after 60 seconds."
         except Exception as e:
             print(f"[Diagnostic] Command failed: {e}")
             return str(e)
@@ -199,72 +215,84 @@ def main():
         messages.append({"role": "user", "content": user_prompt})
 
         # Agent Loop: call model and execute tools until final text answer is produced
-        while True:
-            params = {
-                "model": model,
-                "messages": messages,
-                "tools": tools,
-            }
-            if args.max_tokens is not None:
-                params["max_tokens"] = args.max_tokens
+        try:
+            while True:
+                params = {
+                    "model": model,
+                    "messages": messages,
+                    "tools": tools,
+                }
+                if args.max_tokens is not None:
+                    params["max_tokens"] = args.max_tokens
 
-            chat = client.chat.completions.create(**params)
+                chat = client.chat.completions.create(**params)
 
-            if not chat.choices or len(chat.choices) == 0:
-                raise RuntimeError("no choices in response")
+                if not chat.choices or len(chat.choices) == 0:
+                    raise RuntimeError("no choices in response")
 
-            if chat.usage:
-                session_prompt_tokens += chat.usage.prompt_tokens
-                session_completion_tokens += chat.usage.completion_tokens
-                context_pct = (chat.usage.prompt_tokens / context_window) * 100
-                print(
-                    f"\n[Context & Token Usage] Context: {chat.usage.prompt_tokens:,}/{context_window:,} tokens ({context_pct:.2f}%) | "
-                    f"Generated: {chat.usage.completion_tokens:,} tokens | "
-                    f"Turn Total: {chat.usage.total_tokens:,} tokens (Session: {session_prompt_tokens + session_completion_tokens:,})",
-                    flush=True
-                )
+                if chat.usage:
+                    session_prompt_tokens += chat.usage.prompt_tokens
+                    session_completion_tokens += chat.usage.completion_tokens
+                    context_pct = (chat.usage.prompt_tokens / context_window) * 100
+                    print(
+                        f"\n[Context & Token Usage] Context: {chat.usage.prompt_tokens:,}/{context_window:,} tokens ({context_pct:.2f}%) | "
+                        f"Generated: {chat.usage.completion_tokens:,} tokens | "
+                        f"Turn Total: {chat.usage.total_tokens:,} tokens (Session: {session_prompt_tokens + session_completion_tokens:,})",
+                        flush=True
+                    )
 
-            response_message = chat.choices[0].message
-            tool_calls = response_message.tool_calls
-            if not tool_calls and response_message.content:
-                text = response_message.content.strip()
-                start = text.find("{")
-                end = text.rfind("}")
-                if start != -1 and end != -1 and end > start:
-                    json_candidate = text[start:end+1]
-                    try:
-                        parsed = json.loads(json_candidate)
-                        if isinstance(parsed, dict) and "name" in parsed and "arguments" in parsed:
-                            from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
-                            args_str = json.dumps(parsed["arguments"]) if isinstance(parsed["arguments"], dict) else str(parsed["arguments"])
-                            tool_calls = [
-                                ChatCompletionMessageToolCall(
-                                    id="call_local_0",
-                                    type="function",
-                                    function=Function(name=parsed["name"], arguments=args_str)
-                                )
-                            ]
-                            response_message.tool_calls = tool_calls
-                            response_message.content = None
-                    except Exception:
-                        pass
+                response_message = chat.choices[0].message
+                tool_calls = response_message.tool_calls
+                if not tool_calls and response_message.content:
+                    text = response_message.content.strip()
+                    start = text.find("{")
+                    end = text.rfind("}")
+                    if start != -1 and end != -1 and end > start:
+                        json_candidate = text[start:end+1]
+                        try:
+                            parsed = json.loads(json_candidate)
+                            if isinstance(parsed, dict) and "name" in parsed and "arguments" in parsed:
+                                from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
+                                args_str = json.dumps(parsed["arguments"]) if isinstance(parsed["arguments"], dict) else str(parsed["arguments"])
+                                tool_calls = [
+                                    ChatCompletionMessageToolCall(
+                                        id="call_local_0",
+                                        type="function",
+                                        function=Function(name=parsed["name"], arguments=args_str)
+                                    )
+                                ]
+                                response_message.tool_calls = tool_calls
+                                response_message.content = None
+                        except Exception:
+                            pass
 
-            messages.append(response_message)
+                messages.append(response_message)
 
-            if not tool_calls:
-                if response_message.content:
-                    print(response_message.content, flush=True)
-                break
+                if not tool_calls:
+                    if response_message.content:
+                        print(response_message.content, flush=True)
+                    break
 
-            print(f"\n[Model Response] Requested {len(tool_calls)} tool call(s):")
-            for tool_call in tool_calls:
-                print(f"  • Tool: {tool_call.function.name} | ID: {tool_call.id} | Arguments: {tool_call.function.arguments}")
-                result = execute_tool(tool_call)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
+                print(f"\n[Model Response] Requested {len(tool_calls)} tool call(s):")
+                for tool_call in tool_calls:
+                    print(f"  • Tool: {tool_call.function.name} | ID: {tool_call.id} | Arguments: {tool_call.function.arguments}")
+                    result = execute_tool(tool_call)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result,
+                    })
+        except KeyboardInterrupt:
+            print("\n[Interrupted] Operation cancelled by user.", flush=True)
+            # Remove incomplete user prompt from history
+            if messages and hasattr(messages[-1], "get") and messages[-1].get("role") == "user":
+                messages.pop()
+            continue
+        except Exception as e:
+            print(f"\n[Error] {e}", flush=True)
+            if messages and hasattr(messages[-1], "get") and messages[-1].get("role") == "user":
+                messages.pop()
+            continue
 
 
 if __name__ == "__main__":
