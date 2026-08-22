@@ -1,7 +1,13 @@
 [project]
 name = "atelier"
 version = "0.1.0"
-requires-python = ">=3.14"
+description = "A minimalist, memory- and compute-efficient AI coding assistant and agent harness"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
 dependencies = [
     "openai>=2.15.0",
 ]
+
+[project.scripts]
+atelier = "atelier.main:main"
