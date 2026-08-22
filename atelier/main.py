@@ -7,6 +7,8 @@ import sys
 from dataclasses import dataclass, field
 
 from openai import OpenAI
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
 
 if os.path.exists(".env"):
     with open(".env", "r") as f:
@@ -387,6 +389,23 @@ class MockChatChoice:
         self.message = message
 
 
+class MockDelta:
+    def __init__(self, content=None, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class MockChunkChoice:
+    def __init__(self, delta):
+        self.delta = delta
+
+
+class MockChatCompletionChunk:
+    def __init__(self, delta=None, usage=None):
+        self.choices = [MockChunkChoice(delta)] if delta is not None else []
+        self.usage = usage
+
+
 class MockUsage:
     def __init__(self, prompt_tokens, completion_tokens):
         self.prompt_tokens = prompt_tokens
@@ -406,62 +425,93 @@ class MockClient:
             def create(self, **params):
                 messages = params.get("messages", [])
                 last_msg = messages[-1] if messages else {}
-                from openai.types.chat.chat_completion_message import ChatCompletionMessage
-                from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
+                is_stream = params.get("stream", False)
+
+                tool_calls = None
+                text_content = None
+                prompt_tokens = 110
+                completion_tokens = 25
 
                 # If last message was a tool result, return final explanation
                 if isinstance(last_msg, dict) and last_msg.get("role") == "tool":
                     tool_content = str(last_msg.get("content", ""))
                     snippet = (tool_content[:80] + "...") if len(tool_content) > 80 else tool_content
-                    msg = ChatCompletionMessage(
-                        role="assistant",
-                        content=f"Successfully executed tool in mock mode. Output summary: '{snippet}'",
-                    )
-                    return MockChatCompletion(msg, prompt_tokens=210, completion_tokens=30)
-
-                # Otherwise inspect user message
-                user_content = ""
-                for m in reversed(messages):
-                    if isinstance(m, dict) and m.get("role") == "user":
-                        user_content = m.get("content", "")
-                        break
-
-                if "write" in user_content.lower():
-                    tool_calls = [
-                        ChatCompletionMessageToolCall(
-                            id="mock_call_write_1",
-                            type="function",
-                            function=Function(name="Write", arguments=json.dumps({"file_path": "mock_sample.txt", "content": "Hello from Atelier Mock Mode!"}))
-                        )
-                    ]
-                    msg = ChatCompletionMessage(role="assistant", content=None, tool_calls=tool_calls)
-                    return MockChatCompletion(msg, prompt_tokens=140, completion_tokens=40)
-                elif "bash" in user_content.lower() or "command" in user_content.lower():
-                    tool_calls = [
-                        ChatCompletionMessageToolCall(
-                            id="mock_call_bash_1",
-                            type="function",
-                            function=Function(name="Bash", arguments=json.dumps({"command": "echo 'Mock command executed successfully'"}))
-                        )
-                    ]
-                    msg = ChatCompletionMessage(role="assistant", content=None, tool_calls=tool_calls)
-                    return MockChatCompletion(msg, prompt_tokens=140, completion_tokens=40)
-                elif "read" in user_content.lower() or "pyproject" in user_content.lower():
-                    tool_calls = [
-                        ChatCompletionMessageToolCall(
-                            id="mock_call_read_1",
-                            type="function",
-                            function=Function(name="Read", arguments=json.dumps({"file_path": "pyproject.toml"}))
-                        )
-                    ]
-                    msg = ChatCompletionMessage(role="assistant", content=None, tool_calls=tool_calls)
-                    return MockChatCompletion(msg, prompt_tokens=140, completion_tokens=40)
+                    text_content = f"Successfully executed tool in mock mode. Output summary: '{snippet}'"
+                    prompt_tokens = 210
+                    completion_tokens = 30
                 else:
-                    msg = ChatCompletionMessage(
-                        role="assistant",
-                        content=f"Echo from Zero-Model Mock: Received '{user_content}'. All agent systems are operational!",
-                    )
-                    return MockChatCompletion(msg, prompt_tokens=110, completion_tokens=25)
+                    # Otherwise inspect user message
+                    user_content = ""
+                    for m in reversed(messages):
+                        if isinstance(m, dict) and m.get("role") == "user":
+                            user_content = m.get("content", "")
+                            break
+
+                    if "write" in user_content.lower():
+                        tool_calls = [
+                            ChatCompletionMessageToolCall(
+                                id="mock_call_write_1",
+                                type="function",
+                                function=Function(name="Write", arguments=json.dumps({"file_path": "mock_sample.txt", "content": "Hello from Atelier Mock Mode!"}))
+                            )
+                        ]
+                        prompt_tokens = 140
+                        completion_tokens = 40
+                    elif "bash" in user_content.lower() or "command" in user_content.lower():
+                        tool_calls = [
+                            ChatCompletionMessageToolCall(
+                                id="mock_call_bash_1",
+                                type="function",
+                                function=Function(name="Bash", arguments=json.dumps({"command": "echo 'Mock command executed successfully'"}))
+                            )
+                        ]
+                        prompt_tokens = 140
+                        completion_tokens = 40
+                    elif "read" in user_content.lower() or "pyproject" in user_content.lower():
+                        tool_calls = [
+                            ChatCompletionMessageToolCall(
+                                id="mock_call_read_1",
+                                type="function",
+                                function=Function(name="Read", arguments=json.dumps({"file_path": "pyproject.toml"}))
+                            )
+                        ]
+                        prompt_tokens = 140
+                        completion_tokens = 40
+                    else:
+                        text_content = f"Echo from Zero-Model Mock: Received '{user_content}'. All agent systems are operational!"
+                        prompt_tokens = 110
+                        completion_tokens = 25
+
+                if is_stream:
+                    def stream_generator():
+                        if tool_calls:
+                            tc_chunks = []
+                            for i, tc in enumerate(tool_calls):
+                                tc_chunk = type("TCChunk", (), {
+                                    "index": i,
+                                    "id": tc.id,
+                                    "function": type("FuncChunk", (), {
+                                        "name": tc.function.name,
+                                        "arguments": tc.function.arguments,
+                                    })()
+                                })()
+                                tc_chunks.append(tc_chunk)
+                            yield MockChatCompletionChunk(delta=MockDelta(tool_calls=tc_chunks))
+                            yield MockChatCompletionChunk(usage=MockUsage(prompt_tokens, completion_tokens))
+                        else:
+                            words = (text_content or "").split(" ")
+                            for i, word in enumerate(words):
+                                chunk_str = word + (" " if i < len(words) - 1 else "")
+                                yield MockChatCompletionChunk(delta=MockDelta(content=chunk_str))
+                            yield MockChatCompletionChunk(usage=MockUsage(prompt_tokens, completion_tokens))
+                    return stream_generator()
+
+                msg = ChatCompletionMessage(
+                    role="assistant",
+                    content=text_content,
+                    tool_calls=tool_calls,
+                )
+                return MockChatCompletion(msg, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
 
         def __init__(self):
             self.completions = self.Completions()
@@ -653,41 +703,81 @@ def main():
 
         state.messages.append({"role": "user", "content": user_prompt})
 
-        # Agent Loop: call model and execute tools until final text answer is produced
+        # Agent Loop: call model with real-time streaming and execute tools
         try:
             while True:
                 params = {
                     "model": state.model,
                     "messages": state.messages,
                     "tools": tools,
+                    "stream": True,
                 }
                 if args.max_tokens is not None:
                     params["max_tokens"] = args.max_tokens
 
-                chat = client.chat.completions.create(**params)
+                try:
+                    stream = client.chat.completions.create(**params, stream_options={"include_usage": True})
+                except (TypeError, Exception):
+                    stream = client.chat.completions.create(**params)
 
-                if not chat.choices or len(chat.choices) == 0:
-                    raise RuntimeError("no choices in response")
+                full_content = ""
+                tool_calls_dict = {}
+                usage_obj = None
+                printed_header = False
 
-                if chat.usage:
-                    state.last_prompt_tokens = chat.usage.prompt_tokens
-                    state.session_prompt_tokens += chat.usage.prompt_tokens
-                    state.session_completion_tokens += chat.usage.completion_tokens
-                    context_pct = (chat.usage.prompt_tokens / state.context_window) * 100
-                    pct_color = C.GREEN if context_pct < 50 else (C.YELLOW if context_pct < 80 else C.RED)
-                    print(
-                        f"\n{C.DIM}┌─ [Context & Tokens]{C.RESET} "
-                        f"Context: {C.BOLD}{chat.usage.prompt_tokens:,}{C.RESET}/{state.context_window:,} ({pct_color}{context_pct:.2f}%{C.RESET}) | "
-                        f"Gen: {C.BOLD}{chat.usage.completion_tokens:,}{C.RESET} | "
-                        f"Turn: {chat.usage.total_tokens:,} | "
-                        f"Session: {state.session_prompt_tokens + state.session_completion_tokens:,}",
-                        flush=True
+                for chunk in stream:
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        usage_obj = chunk.usage
+
+                    if not chunk.choices or len(chunk.choices) == 0:
+                        continue
+
+                    delta = chunk.choices[0].delta
+                    if not delta:
+                        continue
+
+                    if getattr(delta, "content", None):
+                        if not printed_header:
+                            print(f"\n{C.BOLD_GREEN}🤖 {state.model}:{C.RESET}\n", end="", flush=True)
+                            printed_header = True
+                        print(delta.content, end="", flush=True)
+                        full_content += delta.content
+
+                    if getattr(delta, "tool_calls", None):
+                        for tc_chunk in delta.tool_calls:
+                            idx = getattr(tc_chunk, "index", 0)
+                            if idx not in tool_calls_dict:
+                                tool_calls_dict[idx] = {
+                                    "id": getattr(tc_chunk, "id", "") or "",
+                                    "name": getattr(tc_chunk.function, "name", "") if getattr(tc_chunk, "function", None) and getattr(tc_chunk.function, "name", None) else "",
+                                    "arguments": getattr(tc_chunk.function, "arguments", "") if getattr(tc_chunk, "function", None) and getattr(tc_chunk.function, "arguments", None) else "",
+                                }
+                            else:
+                                if getattr(tc_chunk, "id", None):
+                                    tool_calls_dict[idx]["id"] += tc_chunk.id
+                                if getattr(tc_chunk, "function", None):
+                                    if getattr(tc_chunk.function, "name", None):
+                                        tool_calls_dict[idx]["name"] += tc_chunk.function.name
+                                    if getattr(tc_chunk.function, "arguments", None):
+                                        tool_calls_dict[idx]["arguments"] += tc_chunk.function.arguments
+
+                if printed_header and full_content:
+                    print(flush=True)
+
+                final_tool_calls = []
+                for idx in sorted(tool_calls_dict.keys()):
+                    tc_data = tool_calls_dict[idx]
+                    final_tool_calls.append(
+                        ChatCompletionMessageToolCall(
+                            id=tc_data["id"] or f"call_stream_{idx}",
+                            type="function",
+                            function=Function(name=tc_data["name"], arguments=tc_data["arguments"])
+                        )
                     )
 
-                response_message = chat.choices[0].message
-                tool_calls = response_message.tool_calls
-                if not tool_calls and response_message.content:
-                    text = response_message.content.strip()
+                # Fallback for local models outputting JSON tool calls in raw content text
+                if not final_tool_calls and full_content:
+                    text = full_content.strip()
                     start = text.find("{")
                     end = text.rfind("}")
                     if start != -1 and end != -1 and end > start:
@@ -695,29 +785,48 @@ def main():
                         try:
                             parsed = json.loads(json_candidate)
                             if isinstance(parsed, dict) and "name" in parsed and "arguments" in parsed:
-                                from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
                                 args_str = json.dumps(parsed["arguments"]) if isinstance(parsed["arguments"], dict) else str(parsed["arguments"])
-                                tool_calls = [
+                                final_tool_calls = [
                                     ChatCompletionMessageToolCall(
                                         id="call_local_0",
                                         type="function",
                                         function=Function(name=parsed["name"], arguments=args_str)
                                     )
                                 ]
-                                response_message.tool_calls = tool_calls
-                                response_message.content = None
+                                full_content = None
                         except Exception:
                             pass
 
+                if usage_obj:
+                    p_tok = getattr(usage_obj, "prompt_tokens", 0)
+                    c_tok = getattr(usage_obj, "completion_tokens", 0)
+                    t_tok = getattr(usage_obj, "total_tokens", p_tok + c_tok)
+                    state.last_prompt_tokens = p_tok
+                    state.session_prompt_tokens += p_tok
+                    state.session_completion_tokens += c_tok
+                    context_pct = (p_tok / state.context_window) * 100 if state.context_window > 0 else 0
+                    pct_color = C.GREEN if context_pct < 50 else (C.YELLOW if context_pct < 80 else C.RED)
+                    print(
+                        f"\n{C.DIM}┌─ [Context & Tokens]{C.RESET} "
+                        f"Context: {C.BOLD}{p_tok:,}{C.RESET}/{state.context_window:,} ({pct_color}{context_pct:.2f}%{C.RESET}) | "
+                        f"Gen: {C.BOLD}{c_tok:,}{C.RESET} | "
+                        f"Turn: {t_tok:,} | "
+                        f"Session: {state.session_prompt_tokens + state.session_completion_tokens:,}",
+                        flush=True
+                    )
+
+                response_message = ChatCompletionMessage(
+                    role="assistant",
+                    content=full_content if not final_tool_calls else None,
+                    tool_calls=final_tool_calls if final_tool_calls else None,
+                )
                 state.messages.append(response_message)
 
-                if not tool_calls:
-                    if response_message.content:
-                        print(f"\n{C.BOLD_GREEN}🤖 {state.model}:{C.RESET}\n{response_message.content}", flush=True)
+                if not final_tool_calls:
                     break
 
-                print(f"\n{C.BOLD_MAGENTA}[Model Response]{C.RESET} {C.MAGENTA}Requested {len(tool_calls)} tool call(s):{C.RESET}")
-                for tool_call in tool_calls:
+                print(f"\n{C.BOLD_MAGENTA}[Model Response]{C.RESET} {C.MAGENTA}Requested {len(final_tool_calls)} tool call(s):{C.RESET}")
+                for tool_call in final_tool_calls:
                     print(f"  • {C.BOLD}Tool:{C.RESET} {C.BOLD_CYAN}{tool_call.function.name}{C.RESET} | {C.DIM}ID: {tool_call.id}{C.RESET} | {C.DIM}Args: {tool_call.function.arguments}{C.RESET}")
                     result = execute_tool(tool_call, workdir=state.workdir, auto_approve=state.auto_approve)
                     state.messages.append({

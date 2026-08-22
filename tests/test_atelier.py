@@ -179,6 +179,24 @@ class TestAtelierSandbox(unittest.TestCase):
         handled = dispatch_slash_command("Read pyproject.toml", state)
         self.assertFalse(handled)
 
+    def test_mock_client_streaming_text(self):
+        client = MockClient()
+        chunks = list(client.chat.completions.create(messages=[{"role": "user", "content": "hello"}], stream=True))
+        self.assertGreater(len(chunks), 1)
+        text_streamed = "".join([c.choices[0].delta.content for c in chunks if c.choices and c.choices[0].delta.content])
+        self.assertIn("Echo from Zero-Model Mock", text_streamed)
+        # Verify usage in final chunk
+        final_chunk = chunks[-1]
+        self.assertIsNotNone(final_chunk.usage)
+        self.assertEqual(final_chunk.usage.prompt_tokens, 110)
+
+    def test_mock_client_streaming_tool_call(self):
+        client = MockClient()
+        chunks = list(client.chat.completions.create(messages=[{"role": "user", "content": "read pyproject"}], stream=True))
+        tc_chunks = [c for c in chunks if c.choices and c.choices[0].delta.tool_calls]
+        self.assertTrue(len(tc_chunks) > 0)
+        self.assertEqual(tc_chunks[0].choices[0].delta.tool_calls[0].function.name, "Read")
+
 
 if __name__ == "__main__":
     unittest.main()
