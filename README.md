@@ -68,29 +68,21 @@ echo "OPENROUTER_API_KEY=your_key_here" > .env
 ./atelier.sh --local -m qwen2.5-coder:7b -p "Write a python script called math_utils.py with add and multiply functions"
 ```
 
-### 3. Zero-Model Testing Mode (Instant / Offline)
-Run tests and try the UI without any API key or GPU:
-```bash
-# Interactive mock mode
-./atelier.sh --mock
-
-# Single prompt mock test
-./atelier.sh --mock -p "Read pyproject.toml"
-
-# Run automated unit test suite
-uv run -m unittest discover tests
-```
-
-### 4. Specifying a Target Working Directory
+### 3. Specifying a Target Working Directory
 Confine all file reads, writes, and shell execution to a specific project directory:
 ```bash
 ./atelier.sh -d /path/to/my-project --local -m qwen2.5-coder:7b
 ```
 
-### 5. Non-Interactive / Auto-Approve Mode
+### 4. Non-Interactive / Auto-Approve Mode
 By default, Atelier prompts for confirmation before running any shell command or overwriting an existing file. Use `-y` to auto-approve:
 ```bash
 ./atelier.sh -y -d /path/to/my-project --local -m qwen2.5-coder:7b
+```
+
+### 5. Running Automated Unit Tests
+```bash
+uv run -m unittest discover tests
 ```
 
 ---
@@ -103,9 +95,6 @@ Inside the interactive REPL, you can control Atelier dynamically:
 | :--- | :--- | :--- |
 | **`/models`** *(or `/ls`)* | Discover downloaded local Ollama models & cloud recommendations | `/models` |
 | **`/model [provider] [name]`** | View or switch active model/provider live | `/model local qwen2.5-coder:7b` |
-| **`/local [name]`** | Switch immediately to local Ollama model | `/local qwen3:8b` |
-| **`/cloud [name]`** | Switch immediately to OpenRouter cloud model | `/cloud anthropic/claude-3.5-sonnet` |
-| **`/mock`** | Switch immediately to zero-model offline testing | `/mock` |
 | **`/cd [path]`** | Change active working directory without restarting | `/cd ~/projects/my-api` |
 | **`/clear`** *(or `/reset`)* | Clear conversation history and reset context tokens to 0 | `/clear` |
 | **`/stats`** *(or `/context`)* | View active context token usage, model info, and session odometer | `/stats` |
@@ -126,9 +115,8 @@ options:
   -p P                  Initial prompt
   -d, --dir, --workdir  Target working directory (default: current directory)
   -y, --yes             Auto-approve shell commands and file overwrites without prompting
-  --mock, --dry-run     Run in zero-model mock mode for instant testing without API or GPU
   --local, --ollama     Use local Ollama instead of OpenRouter
-  -m, --model MODEL     Model name (default: qwen2.5-coder:7b for local)
+  -m, --model MODEL     Model name (default: qwen2.5-coder:7b for local, liquid/lfm-2.5-2.6b:free for OpenRouter)
   --base-url BASE_URL   Custom API Base URL
   --max-tokens N        Max tokens to generate per response (default: 1024)
   --context-window N    Model max context window limit in tokens

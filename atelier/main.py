@@ -101,9 +101,7 @@ def render_statusbar(model, provider, prompt_tokens, context_window, session_tok
     else:
         context_str = f"Context: 0/{context_window:,} {C.DIM}[░░░░░░░░░░] 0.0%{C.RESET}"
 
-    if provider == "mock":
-        prov_str = f"{C.BOLD_MAGENTA}● Mock{C.RESET}"
-    elif provider == "local":
+    if provider == "local":
         prov_str = f"{C.BOLD_GREEN}● Local{C.RESET}"
     else:
         prov_str = f"{C.BOLD_BLUE}● Cloud{C.RESET}"
@@ -273,16 +271,12 @@ def detect_context_window(model: str, provider: str = "cloud") -> int:
         return 128000
     elif provider == "local":
         return 32768
-    elif provider == "mock":
-        return 32768
     else:
         return 128000
 
 
 def create_client(provider: str, base_url: str = None, api_key: str = None):
-    if provider == "mock":
-        return MockClient()
-    elif provider == "local":
+    if provider == "local":
         url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
         key = api_key or os.getenv("OLLAMA_API_KEY", "ollama")
         return OpenAI(api_key=key, base_url=url)
@@ -295,7 +289,7 @@ def create_client(provider: str, base_url: str = None, api_key: str = None):
         url = base_url or os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         return OpenAI(api_key=key, base_url=url)
     else:
-        raise ValueError(f"Unknown provider: '{provider}'. Options: local, cloud, mock.")
+        raise ValueError(f"Unknown provider: '{provider}'. Options: local, cloud.")
 
 
 def fetch_local_models(base_url: str = None) -> list[dict]:
@@ -314,8 +308,8 @@ def fetch_local_models(base_url: str = None) -> list[dict]:
 
 def switch_model_and_provider(state: SessionState, target_provider: str, target_model: str = None):
     new_provider = target_provider.lower()
-    if new_provider not in ("local", "cloud", "mock"):
-        print(f"{C.RED}Unknown provider '{new_provider}'. Options: local, cloud, mock.{C.RESET}\n")
+    if new_provider not in ("local", "cloud"):
+        print(f"{C.RED}Unknown provider '{new_provider}'. Options: local, cloud.{C.RESET}\n")
         return
 
     # Default model names if not provided
@@ -324,8 +318,6 @@ def switch_model_and_provider(state: SessionState, target_provider: str, target_
             target_model = "qwen2.5-coder:7b"
         elif new_provider == "cloud":
             target_model = "liquid/lfm-2.5-2.6b:free"
-        elif new_provider == "mock":
-            target_model = "mock-model"
 
     try:
         new_client = create_client(
@@ -342,9 +334,7 @@ def switch_model_and_provider(state: SessionState, target_provider: str, target_
     state.model = target_model
     state.context_window = detect_context_window(target_model, new_provider)
 
-    badge = f"{C.BOLD_GREEN}Local (Ollama){C.RESET}" if new_provider == "local" else (
-        f"{C.BOLD_MAGENTA}Mock (Zero-Model){C.RESET}" if new_provider == "mock" else f"{C.BOLD_BLUE}Cloud (OpenRouter){C.RESET}"
-    )
+    badge = f"{C.BOLD_GREEN}Local (Ollama){C.RESET}" if new_provider == "local" else f"{C.BOLD_BLUE}Cloud (OpenRouter){C.RESET}"
     print(f"\n✓ Switched to {badge}: {C.BOLD}{state.model}{C.RESET} (Context Limit: {state.context_window:,} tokens)\n")
 
 
@@ -409,7 +399,7 @@ def cmd_models(state: SessionState, args: str):
             modified = m.get("modified_at", "")[:10]
             is_active = f" {C.BOLD_GREEN}● active{C.RESET}" if name == state.model and state.provider == "local" else ""
             print(f"  • {C.BOLD}{name:<28}{C.RESET} {C.DIM}{size_gb:>5.1f} GB  │  modified {modified}{C.RESET}{is_active}")
-        print(f"\n{C.DIM}To switch: {C.BOLD}/model local <name>{C.RESET} (or {C.BOLD}/local <name>{C.RESET})\n")
+        print(f"\n{C.DIM}To switch: {C.BOLD}/model local <name>{C.RESET}\n")
     else:
         print(f"  {C.YELLOW}No local models found or Ollama is not running at http://localhost:11434{C.RESET}")
         print(f"  {C.DIM}Start Ollama with 'ollama serve' or pull a model with 'ollama run qwen2.5-coder:7b'{C.RESET}\n")
@@ -424,16 +414,14 @@ def cmd_models(state: SessionState, args: str):
     for m_id, desc in cloud_recs:
         is_active = f" {C.BOLD_BLUE}● active{C.RESET}" if m_id == state.model and state.provider == "cloud" else ""
         print(f"  • {C.BOLD}{m_id:<36}{C.RESET} {C.DIM}— {desc}{C.RESET}{is_active}")
-    print(f"\n{C.DIM}To switch: {C.BOLD}/model cloud <id>{C.RESET} (or {C.BOLD}/cloud <id>{C.RESET})\n")
+    print(f"\n{C.DIM}To switch: {C.BOLD}/model cloud <id>{C.RESET}\n")
 
 
-@register_command(["/model", "/m"], "View or switch active model/provider", usage="/model [local|cloud|mock] [name]")
+@register_command(["/model", "/m"], "View or switch active model/provider", usage="/model [local|cloud] [name]")
 def cmd_model(state: SessionState, args: str):
     raw = args.strip()
     if not raw:
-        badge = f"{C.BOLD_GREEN}Local (Ollama){C.RESET}" if state.provider == "local" else (
-            f"{C.BOLD_MAGENTA}Mock (Zero-Model){C.RESET}" if state.provider == "mock" else f"{C.BOLD_BLUE}Cloud (OpenRouter){C.RESET}"
-        )
+        badge = f"{C.BOLD_GREEN}Local (Ollama){C.RESET}" if state.provider == "local" else f"{C.BOLD_BLUE}Cloud (OpenRouter){C.RESET}"
         print(f"\nActive Model: {C.BOLD}{state.model}{C.RESET} [{badge}] | Context Limit: {state.context_window:,} tokens\n")
         return
 
@@ -446,32 +434,12 @@ def cmd_model(state: SessionState, args: str):
     elif first in ("cloud", "openrouter"):
         target_model = parts[1] if len(parts) > 1 else None
         switch_model_and_provider(state, "cloud", target_model)
-    elif first in ("mock", "dry-run"):
-        target_model = parts[1] if len(parts) > 1 else "mock-model"
-        switch_model_and_provider(state, "mock", target_model)
     else:
         target_model = raw
         target_provider = state.provider
         if "/" in target_model and target_provider == "local":
             target_provider = "cloud"
         switch_model_and_provider(state, target_provider, target_model)
-
-
-@register_command(["/local", "/ollama"], "Switch immediately to local Ollama model", usage="/local [model_name]")
-def cmd_local(state: SessionState, args: str):
-    model_name = args.strip() or None
-    switch_model_and_provider(state, "local", model_name)
-
-
-@register_command(["/cloud", "/openrouter"], "Switch immediately to OpenRouter cloud model", usage="/cloud [model_name]")
-def cmd_cloud(state: SessionState, args: str):
-    model_name = args.strip() or None
-    switch_model_and_provider(state, "cloud", model_name)
-
-
-@register_command(["/mock"], "Switch immediately to zero-model mock mode", usage="/mock")
-def cmd_mock(state: SessionState, args: str):
-    switch_model_and_provider(state, "mock", "mock-model")
 
 
 @register_command(["/cd", "/dir"], "View or change the working directory", usage="/cd [path]")
@@ -539,148 +507,11 @@ def dispatch_slash_command(user_input: str, state: SessionState) -> bool:
         return True
 
 
-class MockChatChoice:
-    def __init__(self, message):
-        self.message = message
-
-
-class MockDelta:
-    def __init__(self, content=None, tool_calls=None):
-        self.content = content
-        self.tool_calls = tool_calls
-
-
-class MockChunkChoice:
-    def __init__(self, delta):
-        self.delta = delta
-
-
-class MockChatCompletionChunk:
-    def __init__(self, delta=None, usage=None):
-        self.choices = [MockChunkChoice(delta)] if delta is not None else []
-        self.usage = usage
-
-
-class MockUsage:
-    def __init__(self, prompt_tokens, completion_tokens):
-        self.prompt_tokens = prompt_tokens
-        self.completion_tokens = completion_tokens
-        self.total_tokens = prompt_tokens + completion_tokens
-
-
-class MockChatCompletion:
-    def __init__(self, message, prompt_tokens=150, completion_tokens=45):
-        self.choices = [MockChatChoice(message)]
-        self.usage = MockUsage(prompt_tokens, completion_tokens)
-
-
-class MockClient:
-    class Chat:
-        class Completions:
-            def create(self, **params):
-                messages = params.get("messages", [])
-                last_msg = messages[-1] if messages else {}
-                is_stream = params.get("stream", False)
-
-                tool_calls = None
-                text_content = None
-                prompt_tokens = 110
-                completion_tokens = 25
-
-                # If last message was a tool result, return final explanation
-                if isinstance(last_msg, dict) and last_msg.get("role") == "tool":
-                    tool_content = str(last_msg.get("content", ""))
-                    snippet = (tool_content[:80] + "...") if len(tool_content) > 80 else tool_content
-                    text_content = f"Successfully executed tool in mock mode. Output summary: '{snippet}'"
-                    prompt_tokens = 210
-                    completion_tokens = 30
-                else:
-                    # Otherwise inspect user message
-                    user_content = ""
-                    for m in reversed(messages):
-                        if isinstance(m, dict) and m.get("role") == "user":
-                            user_content = m.get("content", "")
-                            break
-
-                    if "write" in user_content.lower():
-                        tool_calls = [
-                            ChatCompletionMessageToolCall(
-                                id="mock_call_write_1",
-                                type="function",
-                                function=Function(name="Write", arguments=json.dumps({"file_path": "mock_sample.txt", "content": "Hello from Atelier Mock Mode!"}))
-                            )
-                        ]
-                        prompt_tokens = 140
-                        completion_tokens = 40
-                    elif "bash" in user_content.lower() or "command" in user_content.lower():
-                        tool_calls = [
-                            ChatCompletionMessageToolCall(
-                                id="mock_call_bash_1",
-                                type="function",
-                                function=Function(name="Bash", arguments=json.dumps({"command": "echo 'Mock command executed successfully'"}))
-                            )
-                        ]
-                        prompt_tokens = 140
-                        completion_tokens = 40
-                    elif "read" in user_content.lower() or "pyproject" in user_content.lower():
-                        tool_calls = [
-                            ChatCompletionMessageToolCall(
-                                id="mock_call_read_1",
-                                type="function",
-                                function=Function(name="Read", arguments=json.dumps({"file_path": "pyproject.toml"}))
-                            )
-                        ]
-                        prompt_tokens = 140
-                        completion_tokens = 40
-                    else:
-                        text_content = f"Echo from Zero-Model Mock: Received '{user_content}'. All agent systems are operational!"
-                        prompt_tokens = 110
-                        completion_tokens = 25
-
-                if is_stream:
-                    def stream_generator():
-                        if tool_calls:
-                            tc_chunks = []
-                            for i, tc in enumerate(tool_calls):
-                                tc_chunk = type("TCChunk", (), {
-                                    "index": i,
-                                    "id": tc.id,
-                                    "function": type("FuncChunk", (), {
-                                        "name": tc.function.name,
-                                        "arguments": tc.function.arguments,
-                                    })()
-                                })()
-                                tc_chunks.append(tc_chunk)
-                            yield MockChatCompletionChunk(delta=MockDelta(tool_calls=tc_chunks))
-                            yield MockChatCompletionChunk(usage=MockUsage(prompt_tokens, completion_tokens))
-                        else:
-                            words = (text_content or "").split(" ")
-                            for i, word in enumerate(words):
-                                chunk_str = word + (" " if i < len(words) - 1 else "")
-                                yield MockChatCompletionChunk(delta=MockDelta(content=chunk_str))
-                            yield MockChatCompletionChunk(usage=MockUsage(prompt_tokens, completion_tokens))
-                    return stream_generator()
-
-                msg = ChatCompletionMessage(
-                    role="assistant",
-                    content=text_content,
-                    tool_calls=tool_calls,
-                )
-                return MockChatCompletion(msg, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
-
-        def __init__(self):
-            self.completions = self.Completions()
-
-    def __init__(self):
-        self.chat = self.Chat()
-
-
 def main():
     p = argparse.ArgumentParser(description="Atelier — Minimalist AI Coding Harness")
     p.add_argument("-p", required=False, help="Initial prompt")
     p.add_argument("-d", "--dir", "--workdir", default=os.getcwd(), help="Target working directory for file operations and commands (default: current directory)")
     p.add_argument("-y", "--yes", "--auto-approve", dest="auto_approve", action="store_true", help="Automatically approve shell commands and file overwrites without prompting")
-    p.add_argument("--mock", "--dry-run", dest="mock", action="store_true", help="Run in zero-model mock mode for instant testing without API or GPU")
     p.add_argument("--local", "--ollama", dest="local", action="store_true", help="Use local Ollama instead of OpenRouter")
     p.add_argument(
         "-m",
@@ -708,10 +539,8 @@ def main():
     if not os.path.exists(workdir):
         os.makedirs(workdir, exist_ok=True)
 
-    provider_type = "mock" if args.mock else ("local" if args.local else "cloud")
-    if args.mock:
-        model = args.model or "mock-model"
-    elif args.local:
+    provider_type = "local" if args.local else "cloud"
+    if args.local:
         model = args.model or "qwen2.5-coder:7b"
     else:
         model = args.model or "liquid/lfm-2.5-2.6b:free"
@@ -722,7 +551,7 @@ def main():
         client = create_client(provider_type, base_url=args.base_url)
     except Exception as e:
         if provider_type == "cloud":
-            raise RuntimeError(f"{e} Use --local to run with Ollama or --mock for offline test mode.")
+            raise RuntimeError(f"{e} Use --local to run with local Ollama models.")
         raise
 
     tools = [{
@@ -802,9 +631,7 @@ def main():
         base_url=args.base_url,
     )
 
-    if args.mock:
-        provider_badge = f"{C.BOLD_MAGENTA}Mock (Zero-Model){C.RESET}"
-    elif args.local:
+    if args.local:
         provider_badge = f"{C.BOLD_GREEN}Local (Ollama){C.RESET}"
     else:
         provider_badge = f"{C.BOLD_BLUE}Cloud (OpenRouter){C.RESET}"

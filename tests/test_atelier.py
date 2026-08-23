@@ -9,13 +9,13 @@ from unittest.mock import patch, MagicMock
 from atelier.main import (
     execute_tool,
     resolve_safe_path,
-    MockClient,
     SessionState,
     dispatch_slash_command,
     COMMAND_REGISTRY,
     register_command,
     fetch_local_models,
     switch_model_and_provider,
+    create_client,
 )
 
 
@@ -27,6 +27,7 @@ class DummyToolCall:
 class TestAtelierSandbox(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp(prefix="atelier_test_")
+        self.dummy_client = MagicMock()
 
     def tearDown(self):
         if os.path.exists(self.test_dir):
@@ -75,20 +76,16 @@ class TestAtelierSandbox(unittest.TestCase):
         self.assertEqual(os.path.realpath(res.strip()), os.path.realpath(self.test_dir))
 
     def test_tool_write_overwrite_permission_denied(self):
-        # Create initial file
         target = os.path.join(self.test_dir, "existing.txt")
         with open(target, "w") as f:
             f.write("original content")
 
         write_call = DummyToolCall("Write", {"file_path": "existing.txt", "content": "overwritten content"})
         
-        # Simulate user typing 'n' to deny permission
-        from unittest.mock import patch
         with patch("builtins.input", return_value="n"):
             res = execute_tool(write_call, workdir=self.test_dir, auto_approve=False)
 
         self.assertIn("Permission Denied", res)
-        # Verify content was NOT overwritten
         with open(target, "r") as f:
             self.assertEqual(f.read(), "original content")
 
@@ -99,13 +96,12 @@ class TestAtelierSandbox(unittest.TestCase):
 
         write_call = DummyToolCall("Write", {"file_path": "existing.txt", "content": "overwritten content"})
         res = execute_tool(write_call, workdir=self.test_dir, auto_approve=True)
-        self.assertEqual(write_res := res, "")
+        self.assertEqual(res, "")
         with open(target, "r") as f:
             self.assertEqual(f.read(), "overwritten content")
 
     def test_tool_bash_permission_denied(self):
         call = DummyToolCall("Bash", {"command": "echo 'should not run'"})
-        from unittest.mock import patch
         with patch("builtins.input", return_value="n"):
             res = execute_tool(call, workdir=self.test_dir, auto_approve=False)
 
@@ -116,46 +112,41 @@ class TestAtelierSandbox(unittest.TestCase):
         res = execute_tool(call, workdir=self.test_dir, auto_approve=True)
         self.assertIn("allowed run", res)
 
-    def test_mock_client_completion(self):
-        client = MockClient()
-        resp = client.chat.completions.create(messages=[{"role": "user", "content": "read pyproject"}])
-        self.assertEqual(len(resp.choices), 1)
-        self.assertTrue(resp.choices[0].message.tool_calls is not None)
-        self.assertEqual(resp.choices[0].message.tool_calls[0].function.name, "Read")
-
     def test_slash_command_exit(self):
-        state = SessionState(client=MockClient(), model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        state = SessionState(client=self.dummy_client, model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command("/exit", state)
         self.assertTrue(handled)
         self.assertTrue(state.should_exit)
 
-    def test_slash_command_model_switch(self):
-        state = SessionState(client=MockClient(), model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
+    def test_slash_command_model_switch_direct(self):
+        state = SessionState(client=self.dummy_client, model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command("/model claude-3-5-sonnet", state)
         self.assertTrue(handled)
         self.assertEqual(state.model, "claude-3-5-sonnet")
         self.assertEqual(state.context_window, 200000)
 
-    def test_slash_command_provider_switch(self):
-        state = SessionState(client=MockClient(), model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
-        handled = dispatch_slash_command("/model mock test-mock-model", state)
-        self.assertTrue(handled)
-        self.assertEqual(state.provider, "mock")
-        self.assertEqual(state.model, "test-mock-model")
-
-    def test_slash_command_local_and_mock(self):
-        state = SessionState(client=MockClient(), model="liquid/lfm-2.5-2.6b:free", provider="cloud", workdir=self.test_dir, context_window=128000)
-        # Test switching to local
-        handled = dispatch_slash_command("/local qwen2.5-coder:14b", state)
+    def test_slash_command_model_local_switch(self):
+        state = SessionState(client=self.dummy_client, model="claude-3-5-sonnet", provider="cloud", workdir=self.test_dir, context_window=200000)
+        handled = dispatch_slash_command("/model local qwen2.5-coder:14b", state)
         self.assertTrue(handled)
         self.assertEqual(state.provider, "local")
         self.assertEqual(state.model, "qwen2.5-coder:14b")
+        self.assertEqual(state.context_window, 32768)
 
-        # Test switching back to mock
-        handled = dispatch_slash_command("/mock", state)
+    def test_slash_command_model_cloud_switch(self):
+        state = SessionState(
+            client=self.dummy_client,
+            model="qwen2.5-coder:7b",
+            provider="local",
+            workdir=self.test_dir,
+            context_window=32768,
+            api_key="test-api-key"
+        )
+        handled = dispatch_slash_command("/model cloud anthropic/claude-3.5-sonnet", state)
         self.assertTrue(handled)
-        self.assertEqual(state.provider, "mock")
-        self.assertEqual(state.model, "mock-model")
+        self.assertEqual(state.provider, "cloud")
+        self.assertEqual(state.model, "anthropic/claude-3.5-sonnet")
+        self.assertEqual(state.context_window, 200000)
 
     def test_fetch_local_models_mocked(self):
         sample_response = json.dumps({
@@ -176,23 +167,23 @@ class TestAtelierSandbox(unittest.TestCase):
             self.assertEqual(models[1]["name"], "deepseek-r1:8b")
 
     def test_slash_command_models_discovery(self):
-        state = SessionState(client=MockClient(), model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        state = SessionState(client=self.dummy_client, model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command("/models", state)
         self.assertTrue(handled)
 
     def test_slash_command_cd(self):
         sub_dir = os.path.join(self.test_dir, "sub_folder")
         os.makedirs(sub_dir, exist_ok=True)
-        state = SessionState(client=MockClient(), model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        state = SessionState(client=self.dummy_client, model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command(f"/cd {sub_dir}", state)
         self.assertTrue(handled)
         self.assertEqual(state.workdir, sub_dir)
 
     def test_slash_command_clear(self):
         state = SessionState(
-            client=MockClient(),
-            model="test-m",
-            provider="mock",
+            client=self.dummy_client,
+            model="qwen2.5-coder:7b",
+            provider="local",
             workdir=self.test_dir,
             context_window=32768,
             messages=[
@@ -209,7 +200,7 @@ class TestAtelierSandbox(unittest.TestCase):
         self.assertEqual(state.last_prompt_tokens, 0)
 
     def test_slash_command_approve_toggle(self):
-        state = SessionState(client=MockClient(), model="test-m", provider="mock", workdir=self.test_dir, context_window=32768, auto_approve=False)
+        state = SessionState(client=self.dummy_client, model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768, auto_approve=False)
         handled = dispatch_slash_command("/approve", state)
         self.assertTrue(handled)
         self.assertTrue(state.auto_approve)
@@ -219,33 +210,24 @@ class TestAtelierSandbox(unittest.TestCase):
         def cmd_ping(state: SessionState, args: str):
             state.model = "pinged"
 
-        state = SessionState(client=MockClient(), model="original", provider="mock", workdir=self.test_dir, context_window=32768)
+        state = SessionState(client=self.dummy_client, model="original", provider="local", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command("/custom_ping", state)
         self.assertTrue(handled)
         self.assertEqual(state.model, "pinged")
 
     def test_slash_command_non_slash_input(self):
-        state = SessionState(client=MockClient(), model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        state = SessionState(client=self.dummy_client, model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command("Read pyproject.toml", state)
         self.assertFalse(handled)
 
-    def test_mock_client_streaming_text(self):
-        client = MockClient()
-        chunks = list(client.chat.completions.create(messages=[{"role": "user", "content": "hello"}], stream=True))
-        self.assertGreater(len(chunks), 1)
-        text_streamed = "".join([c.choices[0].delta.content for c in chunks if c.choices and c.choices[0].delta.content])
-        self.assertIn("Echo from Zero-Model Mock", text_streamed)
-        # Verify usage in final chunk
-        final_chunk = chunks[-1]
-        self.assertIsNotNone(final_chunk.usage)
-        self.assertEqual(final_chunk.usage.prompt_tokens, 110)
+    def test_create_client_local(self):
+        client = create_client("local")
+        self.assertIsNotNone(client)
 
-    def test_mock_client_streaming_tool_call(self):
-        client = MockClient()
-        chunks = list(client.chat.completions.create(messages=[{"role": "user", "content": "read pyproject"}], stream=True))
-        tc_chunks = [c for c in chunks if c.choices and c.choices[0].delta.tool_calls]
-        self.assertTrue(len(tc_chunks) > 0)
-        self.assertEqual(tc_chunks[0].choices[0].delta.tool_calls[0].function.name, "Read")
+    def test_create_client_cloud_without_key_raises(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(ValueError):
+                create_client("cloud")
 
 
 if __name__ == "__main__":
