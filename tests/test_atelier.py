@@ -18,6 +18,7 @@ from atelier.main import (
     create_client,
     prune_tool_outputs,
     compact_context,
+    perform_web_search,
 )
 
 
@@ -317,6 +318,59 @@ class TestAtelierSandbox(unittest.TestCase):
         handled = dispatch_slash_command("/compact", state)
         self.assertTrue(handled)
         self.assertTrue(any("Summary of previous session context" in str(m.get("content", "")) for m in state.messages if isinstance(m, dict)))
+
+    def test_tool_web_search_empty_query(self):
+        res = perform_web_search("   ")
+        self.assertIn("Error", res)
+
+    def test_tool_web_search_duckduckgo_mocked(self):
+        sample_html = """
+        <html>
+          <body>
+            <div class="result">
+              <a class="result__title" href="#">FastAPI Lifespan Events</a>
+              <a class="result__snippet" href="#">Learn how to use lifespan events with asynccontextmanager in FastAPI.</a>
+              <a class="result__url" href="https://duckduckgo.com/l/?kh=-1&uddg=https%3A%2F%2Ffastapi.tiangolo.com%2Flifespan">fastapi.tiangolo.com</a>
+            </div>
+          </body>
+        </html>
+        """
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = sample_html.encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                res = perform_web_search("FastAPI lifespan")
+                self.assertIn("FastAPI Lifespan Events", res)
+                self.assertIn("https://fastapi.tiangolo.com/lifespan", res)
+                self.assertIn("asynccontextmanager", res)
+
+    def test_tool_web_search_tavily_mocked(self):
+        sample_tavily_json = json.dumps({
+            "results": [
+                {
+                    "title": "Pydantic V2 Migration Guide",
+                    "url": "https://docs.pydantic.dev/2.0/migration/",
+                    "content": "Use model_validate instead of parse_obj in Pydantic V2.",
+                }
+            ]
+        }).encode("utf-8")
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = sample_tavily_json
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test-123"}, clear=True):
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                res = perform_web_search("Pydantic v2 migration")
+                self.assertIn("Pydantic V2 Migration Guide", res)
+                self.assertIn("model_validate", res)
+
+    def test_execute_tool_web_search(self):
+        call = DummyToolCall("WebSearch", {"query": "python dataclass field", "max_results": 2})
+        with patch("atelier.main.perform_web_search", return_value="[1] Python Dataclass Reference"):
+            res = execute_tool(call, workdir=self.test_dir)
+            self.assertIn("Python Dataclass Reference", res)
 
 
 if __name__ == "__main__":

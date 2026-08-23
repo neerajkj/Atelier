@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
@@ -135,6 +136,82 @@ def ask_permission(action_type: str, details: list[tuple[str, str]], auto_approv
     return allowed
 
 
+def perform_web_search(query: str, max_results: int = 5) -> str:
+    """Performs web search using Tavily API if configured, otherwise DuckDuckGo Lite."""
+    query = query.strip()
+    if not query:
+        return "Error: Empty search query."
+
+    tavily_key = os.getenv("TAVILY_API_KEY")
+    if tavily_key:
+        try:
+            req_data = json.dumps({
+                "api_key": tavily_key,
+                "query": query,
+                "max_results": max_results,
+                "search_depth": "basic",
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.tavily.com/search",
+                data=req_data,
+                headers={"Content-Type": "application/json", "User-Agent": "Atelier/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=6.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                results = data.get("results", [])
+                if not results:
+                    return f"No web search results found for: '{query}'."
+                formatted = [f"Web Search Results for '{query}':"]
+                for i, r in enumerate(results[:max_results], start=1):
+                    title = r.get("title", "No Title")
+                    url = r.get("url", "")
+                    content = r.get("content", "").strip()
+                    formatted.append(f"[{i}] {title}\n    URL: {url}\n    Snippet: {content}")
+                return "\n\n".join(formatted)
+        except Exception:
+            pass
+
+    # DuckDuckGo HTML Lite search (Zero-key fallback)
+    try:
+        encoded_query = urllib.parse.urlencode({"q": query})
+        url = f"https://html.duckduckgo.com/html/?{encoded_query}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=6.0) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        link_pattern = re.compile(r'<a class="result__url"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
+        snippet_pattern = re.compile(r'<a class="result__snippet"[^>]*>(.*?)</a>', re.DOTALL)
+        title_pattern = re.compile(r'<a class="result__title"[^>]*>(.*?)</a>', re.DOTALL)
+
+        raw_titles = [re.sub(r"<[^>]+>", "", t).strip() for t in title_pattern.findall(html)]
+        raw_snippets = [re.sub(r"<[^>]+>", "", s).strip() for s in snippet_pattern.findall(html)]
+        raw_links = link_pattern.findall(html)
+
+        results = []
+        count = min(len(raw_snippets), max_results)
+        for i in range(count):
+            title = raw_titles[i] if i < len(raw_titles) else "Search Result"
+            snippet = raw_snippets[i]
+            link = raw_links[i][0] if i < len(raw_links) else ""
+            if "uddg=" in link:
+                parsed_params = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
+                link = parsed_params.get("uddg", [link])[0]
+
+            results.append(f"[{i + 1}] {title}\n    URL: {link}\n    Snippet: {snippet}")
+
+        if not results:
+            return f"No search results found for query: '{query}'."
+
+        return f"Web Search Results for '{query}':\n\n" + "\n\n".join(results)
+    except Exception as e:
+        return f"Web search request failed: {e}"
+
+
 def execute_tool(tool_call, workdir=None, auto_approve=False):
     if workdir is None:
         workdir = os.getcwd()
@@ -146,7 +223,12 @@ def execute_tool(tool_call, workdir=None, auto_approve=False):
     except Exception as e:
         return f"Error parsing arguments: {e}"
 
-    if function_name == "Read":
+    if function_name == "WebSearch":
+        query = arguments.get("query", "")
+        max_results = int(arguments.get("max_results", 5)) if arguments.get("max_results") else 5
+        print(f"{C.BOLD_CYAN}[Tool: WebSearch]{C.RESET} Searching web for: {C.BOLD}'{query}'{C.RESET}")
+        return perform_web_search(query, max_results=max_results)
+    elif function_name == "Read":
         raw_path = arguments.get("file_path", "")
         try:
             file_path = resolve_safe_path(raw_path, workdir)
@@ -614,9 +696,10 @@ def cmd_approve(state: SessionState, args: str):
 @register_command(["/tools"], "List available agent tools and descriptions", usage="/tools")
 def cmd_tools(state: SessionState, args: str):
     print(f"\n{C.BOLD_CYAN}Registered Agent Tools:{C.RESET}")
-    print(f"  • {C.BOLD}Read:{C.RESET}  Reads file contents safely within working directory.")
-    print(f"  • {C.BOLD}Write:{C.RESET} Writes or updates files (prompts before overwriting).")
-    print(f"  • {C.BOLD}Bash:{C.RESET}  Executes shell commands with cwd confined to working directory.\n")
+    print(f"  • {C.BOLD}Read:{C.RESET}      Reads file contents safely within working directory.")
+    print(f"  • {C.BOLD}Write:{C.RESET}     Writes or updates files (prompts before overwriting).")
+    print(f"  • {C.BOLD}Bash:{C.RESET}      Executes shell commands with cwd confined to working directory.")
+    print(f"  • {C.BOLD}WebSearch:{C.RESET} Searches the live web for documentation, syntax, and solutions.\n")
 
 
 def dispatch_slash_command(user_input: str, state: SessionState) -> bool:
@@ -681,61 +764,83 @@ def main():
             raise RuntimeError(f"{e} Use --local to run with local Ollama models.")
         raise
 
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "Read",
-            "description": "Read and return the contents of a file",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "The path to the file to read"
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "WebSearch",
+                "description": "Search the live web for current documentation, library API references, error troubleshooting, and examples.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query (e.g. 'FastAPI lifespan event handler example' or 'Pydantic v2 model_validate')"
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of search results to return (default: 5)"
+                        }
                     }
-                },
-                "required": ["file_path"]
+                }
             }
-        }
-    },
-    {
-    "type": "function",
-    "function": {
-        "name": "Write",
-        "description": "Write content to a file",
-        "parameters": {
-            "type": "object",
-            "required": ["file_path", "content"],
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "The path of the file to write to"
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "Read",
+                "description": "Read and return the contents of a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "The path to the file to read"
+                        }
                     },
-                "content": {
-                    "type": "string",
-                    "description": "The content to write to the file"
+                    "required": ["file_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "Write",
+                "description": "Write content to a file",
+                "parameters": {
+                    "type": "object",
+                    "required": ["file_path", "content"],
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "The path of the file to write to"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The content to write to the file"
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "Bash",
+                "description": "Execute a shell command",
+                "parameters": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The command to execute"
+                        }
                     }
                 }
             }
         }
-    },
-    {
-  "type": "function",
-  "function": {
-    "name": "Bash",
-    "description": "Execute a shell command",
-    "parameters": {
-      "type": "object",
-      "required": ["command"],
-      "properties": {
-        "command": {
-          "type": "string",
-          "description": "The command to execute"
-        }
-      }
-    }
-  }
-}
     ]
 
     system_prompt = (

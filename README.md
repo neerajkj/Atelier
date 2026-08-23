@@ -1,6 +1,6 @@
 # Atelier 🎨🛠️
 
-**Atelier** is a minimalist, memory- and compute-efficient AI coding assistant and agent harness. It connects local LLMs (via Ollama) and cloud models (via OpenRouter/OpenAI) to terminal-native tools (`Read`, `Write`, and `Bash`) in an autonomous execution loop.
+**Atelier** is a minimalist, memory- and compute-efficient AI coding assistant and agent harness. It connects local LLMs (via Ollama) and cloud models (via OpenRouter/OpenAI) to terminal-native tools (`WebSearch`, `Read`, `Write`, and `Bash`) in an autonomous execution loop.
 
 ---
 
@@ -11,6 +11,7 @@
   - Native support for local **Ollama** models (`qwen2.5-coder`, `qwen3`, etc.).
   - Support for **OpenRouter** / OpenAI-compatible cloud models.
 - **Robust Tool Calling**:
+  - `WebSearch`: Searches the live web for up-to-date documentation, API references, and solutions (zero-key DuckDuckGo + Tavily).
   - `Read`: Safely reads file contents.
   - `Write`: Writes or updates files on disk.
   - `Bash`: Executes shell commands.
