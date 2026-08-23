@@ -99,16 +99,20 @@ By default, Atelier prompts for confirmation before running any shell command or
 
 Inside the interactive REPL, you can control Atelier dynamically:
 
-| Command | Description |
-| :--- | :--- |
-| `/help` | List all available slash commands and usage |
-| `/model [name]` | View or switch active LLM model on the fly |
-| `/cd [path]` | Change active working directory without restarting |
-| `/clear` | Clear conversation history and reset context window to 0 tokens |
-| `/stats` | View active context token usage, model info, and session odometer |
-| `/approve` | Toggle auto-approve mode for bash commands and file overwrites |
-| `/tools` | List registered tools and schema summaries |
-| `/exit` | Exit the session cleanly |
+| Command | Description | Example |
+| :--- | :--- | :--- |
+| **`/models`** *(or `/ls`)* | Discover downloaded local Ollama models & cloud recommendations | `/models` |
+| **`/model [provider] [name]`** | View or switch active model/provider live | `/model local qwen2.5-coder:7b` |
+| **`/local [name]`** | Switch immediately to local Ollama model | `/local qwen3:8b` |
+| **`/cloud [name]`** | Switch immediately to OpenRouter cloud model | `/cloud anthropic/claude-3.5-sonnet` |
+| **`/mock`** | Switch immediately to zero-model offline testing | `/mock` |
+| **`/cd [path]`** | Change active working directory without restarting | `/cd ~/projects/my-api` |
+| **`/clear`** *(or `/reset`)* | Clear conversation history and reset context tokens to 0 | `/clear` |
+| **`/stats`** *(or `/context`)* | View active context token usage, model info, and session odometer | `/stats` |
+| **`/approve`** *(or `/auto`)* | Toggle auto-approve mode for bash commands and file overwrites | `/approve` |
+| **`/tools`** | List registered tools and parameter descriptions | `/tools` |
+| **`/help`** | List all available slash commands and usage | `/help` |
+| **`/exit`** *(or `/q`)* | Exit the session cleanly | `/exit` |
 
 ---
 

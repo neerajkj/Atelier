@@ -4,7 +4,9 @@ import os
 import re
 import subprocess
 import sys
+import urllib.request
 from dataclasses import dataclass, field
+from typing import Any
 
 from openai import OpenAI
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -240,6 +242,7 @@ def execute_tool(tool_call, workdir=None, auto_approve=False):
 
 @dataclass
 class SessionState:
+    client: Any
     model: str
     provider: str
     workdir: str
@@ -250,6 +253,99 @@ class SessionState:
     messages: list = field(default_factory=list)
     auto_approve: bool = False
     should_exit: bool = False
+    base_url: str = None
+    api_key: str = None
+
+
+def detect_context_window(model: str, provider: str = "cloud") -> int:
+    m = model.lower()
+    if "32k" in m or "qwen2.5" in m or "qwen2" in m:
+        return 32768
+    elif "qwen3:8b" in m:
+        return 40960
+    elif "claude" in m or "sonnet" in m or "haiku" in m:
+        return 200000
+    elif "gemini" in m:
+        return 1000000
+    elif "deepseek" in m:
+        return 65536
+    elif "llama-3.3" in m or "llama-3.1" in m:
+        return 128000
+    elif provider == "local":
+        return 32768
+    elif provider == "mock":
+        return 32768
+    else:
+        return 128000
+
+
+def create_client(provider: str, base_url: str = None, api_key: str = None):
+    if provider == "mock":
+        return MockClient()
+    elif provider == "local":
+        url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        key = api_key or os.getenv("OLLAMA_API_KEY", "ollama")
+        return OpenAI(api_key=key, base_url=url)
+    elif provider == "cloud":
+        key = api_key or os.getenv("OPENROUTER_API_KEY")
+        if not key:
+            raise ValueError(
+                "OPENROUTER_API_KEY is not set. Add it to .env or use '/model local <model>' for Ollama."
+            )
+        url = base_url or os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        return OpenAI(api_key=key, base_url=url)
+    else:
+        raise ValueError(f"Unknown provider: '{provider}'. Options: local, cloud, mock.")
+
+
+def fetch_local_models(base_url: str = None) -> list[dict]:
+    """Queries Ollama's /api/tags endpoint to discover downloaded local models."""
+    url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    root_url = url.replace("/v1", "").rstrip("/")
+    tags_url = f"{root_url}/api/tags"
+    try:
+        req = urllib.request.Request(tags_url, headers={"User-Agent": "Atelier/1.0"})
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("models", [])
+    except Exception:
+        return []
+
+
+def switch_model_and_provider(state: SessionState, target_provider: str, target_model: str = None):
+    new_provider = target_provider.lower()
+    if new_provider not in ("local", "cloud", "mock"):
+        print(f"{C.RED}Unknown provider '{new_provider}'. Options: local, cloud, mock.{C.RESET}\n")
+        return
+
+    # Default model names if not provided
+    if not target_model:
+        if new_provider == "local":
+            target_model = "qwen2.5-coder:7b"
+        elif new_provider == "cloud":
+            target_model = "liquid/lfm-2.5-2.6b:free"
+        elif new_provider == "mock":
+            target_model = "mock-model"
+
+    try:
+        new_client = create_client(
+            new_provider,
+            base_url=state.base_url,
+            api_key=state.api_key if new_provider == "cloud" else None
+        )
+    except Exception as e:
+        print(f"\n{C.RED}Error switching to {new_provider}:{C.RESET} {e}\n")
+        return
+
+    state.client = new_client
+    state.provider = new_provider
+    state.model = target_model
+    state.context_window = detect_context_window(target_model, new_provider)
+
+    badge = f"{C.BOLD_GREEN}Local (Ollama){C.RESET}" if new_provider == "local" else (
+        f"{C.BOLD_MAGENTA}Mock (Zero-Model){C.RESET}" if new_provider == "mock" else f"{C.BOLD_BLUE}Cloud (OpenRouter){C.RESET}"
+    )
+    print(f"\n✓ Switched to {badge}: {C.BOLD}{state.model}{C.RESET} (Context Limit: {state.context_window:,} tokens)\n")
 
 
 COMMAND_REGISTRY = {}
@@ -284,7 +380,7 @@ def cmd_help(state: SessionState, args: str):
     for cmd, info in sorted(COMMAND_REGISTRY.items()):
         if info["usage"] not in seen:
             seen.add(info["usage"])
-            print(f"  {C.BOLD}{info['usage']:<22}{C.RESET} {C.DIM}— {info['description']}{C.RESET}")
+            print(f"  {C.BOLD}{info['usage']:<26}{C.RESET} {C.DIM}— {info['description']}{C.RESET}")
     print()
 
 
@@ -301,22 +397,81 @@ def cmd_clear(state: SessionState, args: str):
     print(f"{C.GREEN}✓ Conversation history cleared. Context reset to 0 tokens.{C.RESET}\n")
 
 
-@register_command(["/model", "/m"], "View or switch active LLM model", usage="/model [name]")
+@register_command(["/models", "/ls"], "Discover downloaded Ollama models and cloud recommendations", usage="/models")
+def cmd_models(state: SessionState, args: str):
+    print(f"\n{C.BOLD_CYAN}🔍 Discovering Local Models (Ollama)...{C.RESET}")
+    local_models = fetch_local_models(state.base_url)
+    if local_models:
+        print(f"\n{C.BOLD_GREEN}Installed Local Models ({len(local_models)} found):{C.RESET}")
+        for m in local_models:
+            name = m.get("name", "unknown")
+            size_gb = m.get("size", 0) / (1024 ** 3)
+            modified = m.get("modified_at", "")[:10]
+            is_active = f" {C.BOLD_GREEN}● active{C.RESET}" if name == state.model and state.provider == "local" else ""
+            print(f"  • {C.BOLD}{name:<28}{C.RESET} {C.DIM}{size_gb:>5.1f} GB  │  modified {modified}{C.RESET}{is_active}")
+        print(f"\n{C.DIM}To switch: {C.BOLD}/model local <name>{C.RESET} (or {C.BOLD}/local <name>{C.RESET})\n")
+    else:
+        print(f"  {C.YELLOW}No local models found or Ollama is not running at http://localhost:11434{C.RESET}")
+        print(f"  {C.DIM}Start Ollama with 'ollama serve' or pull a model with 'ollama run qwen2.5-coder:7b'{C.RESET}\n")
+
+    print(f"{C.BOLD_BLUE}Popular Cloud Models (OpenRouter):{C.RESET}")
+    cloud_recs = [
+        ("anthropic/claude-3.5-sonnet", "Top coding reasoning & large refactoring (200k context)"),
+        ("deepseek/deepseek-chat", "Fast, capable & cost-effective coding (64k context)"),
+        ("meta-llama/llama-3.3-70b-instruct", "Open-weight powerhouse (128k context)"),
+        ("liquid/lfm-2.5-2.6b:free", "Free tier lightweight test model (32k context)"),
+    ]
+    for m_id, desc in cloud_recs:
+        is_active = f" {C.BOLD_BLUE}● active{C.RESET}" if m_id == state.model and state.provider == "cloud" else ""
+        print(f"  • {C.BOLD}{m_id:<36}{C.RESET} {C.DIM}— {desc}{C.RESET}{is_active}")
+    print(f"\n{C.DIM}To switch: {C.BOLD}/model cloud <id>{C.RESET} (or {C.BOLD}/cloud <id>{C.RESET})\n")
+
+
+@register_command(["/model", "/m"], "View or switch active model/provider", usage="/model [local|cloud|mock] [name]")
 def cmd_model(state: SessionState, args: str):
-    new_model = args.strip()
-    if not new_model:
-        print(f"\nActive Model: {C.BOLD}{state.model}{C.RESET} ({state.provider}) | Context Limit: {state.context_window:,} tokens\n")
+    raw = args.strip()
+    if not raw:
+        badge = f"{C.BOLD_GREEN}Local (Ollama){C.RESET}" if state.provider == "local" else (
+            f"{C.BOLD_MAGENTA}Mock (Zero-Model){C.RESET}" if state.provider == "mock" else f"{C.BOLD_BLUE}Cloud (OpenRouter){C.RESET}"
+        )
+        print(f"\nActive Model: {C.BOLD}{state.model}{C.RESET} [{badge}] | Context Limit: {state.context_window:,} tokens\n")
         return
-    state.model = new_model
-    if "32k" in new_model or "qwen2.5-coder:7b" in new_model:
-        state.context_window = 32768
-    elif "qwen3:8b" in new_model:
-        state.context_window = 40960
-    elif "claude" in new_model:
-        state.context_window = 200000
-    elif "gemini" in new_model:
-        state.context_window = 1000000
-    print(f"{C.GREEN}✓ Switched active model to:{C.RESET} {C.BOLD}{state.model}{C.RESET} (Context Limit: {state.context_window:,} tokens)\n")
+
+    parts = raw.split(None, 1)
+    first = parts[0].lower()
+
+    if first in ("local", "ollama"):
+        target_model = parts[1] if len(parts) > 1 else None
+        switch_model_and_provider(state, "local", target_model)
+    elif first in ("cloud", "openrouter"):
+        target_model = parts[1] if len(parts) > 1 else None
+        switch_model_and_provider(state, "cloud", target_model)
+    elif first in ("mock", "dry-run"):
+        target_model = parts[1] if len(parts) > 1 else "mock-model"
+        switch_model_and_provider(state, "mock", target_model)
+    else:
+        target_model = raw
+        target_provider = state.provider
+        if "/" in target_model and target_provider == "local":
+            target_provider = "cloud"
+        switch_model_and_provider(state, target_provider, target_model)
+
+
+@register_command(["/local", "/ollama"], "Switch immediately to local Ollama model", usage="/local [model_name]")
+def cmd_local(state: SessionState, args: str):
+    model_name = args.strip() or None
+    switch_model_and_provider(state, "local", model_name)
+
+
+@register_command(["/cloud", "/openrouter"], "Switch immediately to OpenRouter cloud model", usage="/cloud [model_name]")
+def cmd_cloud(state: SessionState, args: str):
+    model_name = args.strip() or None
+    switch_model_and_provider(state, "cloud", model_name)
+
+
+@register_command(["/mock"], "Switch immediately to zero-model mock mode", usage="/mock")
+def cmd_mock(state: SessionState, args: str):
+    switch_model_and_provider(state, "mock", "mock-model")
 
 
 @register_command(["/cd", "/dir"], "View or change the working directory", usage="/cd [path]")
@@ -553,40 +708,22 @@ def main():
     if not os.path.exists(workdir):
         os.makedirs(workdir, exist_ok=True)
 
+    provider_type = "mock" if args.mock else ("local" if args.local else "cloud")
     if args.mock:
-        client = MockClient()
         model = args.model or "mock-model"
-        context_window = args.context_window or 32768
     elif args.local:
-        base_url = args.base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        api_key = os.getenv("OLLAMA_API_KEY", "ollama")
         model = args.model or "qwen2.5-coder:7b"
-        client = OpenAI(api_key=api_key, base_url=base_url)
     else:
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "OPENROUTER_API_KEY is not set. Use --local or --ollama to use local Ollama models without an API key."
-            )
-        base_url = args.base_url or os.getenv("OPENROUTER_BASE_URL", default="https://openrouter.ai/api/v1")
         model = args.model or "liquid/lfm-2.5-2.6b:free"
-        client = OpenAI(api_key=api_key, base_url=base_url)
 
-    if not args.mock:
-        context_window = args.context_window
-        if not context_window:
-            if "32k" in model or "qwen2.5-coder:7b" in model:
-                context_window = 32768
-            elif "qwen3:8b" in model:
-                context_window = 40960
-            elif "claude" in model:
-                context_window = 200000
-            elif "gemini" in model:
-                context_window = 1000000
-            elif args.local:
-                context_window = 32768
-            else:
-                context_window = 128000
+    context_window = args.context_window or detect_context_window(model, provider_type)
+
+    try:
+        client = create_client(provider_type, base_url=args.base_url)
+    except Exception as e:
+        if provider_type == "cloud":
+            raise RuntimeError(f"{e} Use --local to run with Ollama or --mock for offline test mode.")
+        raise
 
     tools = [{
         "type": "function",
@@ -654,14 +791,15 @@ def main():
     messages = [{"role": "system", "content": system_prompt}]
     initial_prompt = args.p
 
-    provider_type = "mock" if args.mock else ("local" if args.local else "cloud")
     state = SessionState(
+        client=client,
         model=model,
         provider=provider_type,
         workdir=workdir,
         context_window=context_window,
         messages=messages,
         auto_approve=args.auto_approve,
+        base_url=args.base_url,
     )
 
     if args.mock:
@@ -716,9 +854,9 @@ def main():
                     params["max_tokens"] = args.max_tokens
 
                 try:
-                    stream = client.chat.completions.create(**params, stream_options={"include_usage": True})
+                    stream = state.client.chat.completions.create(**params, stream_options={"include_usage": True})
                 except (TypeError, Exception):
-                    stream = client.chat.completions.create(**params)
+                    stream = state.client.chat.completions.create(**params)
 
                 full_content = ""
                 tool_calls_dict = {}

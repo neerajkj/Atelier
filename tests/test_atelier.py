@@ -1,8 +1,11 @@
+import io
 import json
 import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch, MagicMock
+
 from atelier.main import (
     execute_tool,
     resolve_safe_path,
@@ -11,6 +14,8 @@ from atelier.main import (
     dispatch_slash_command,
     COMMAND_REGISTRY,
     register_command,
+    fetch_local_models,
+    switch_model_and_provider,
 )
 
 
@@ -119,28 +124,73 @@ class TestAtelierSandbox(unittest.TestCase):
         self.assertEqual(resp.choices[0].message.tool_calls[0].function.name, "Read")
 
     def test_slash_command_exit(self):
-        state = SessionState(model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        state = SessionState(client=MockClient(), model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command("/exit", state)
         self.assertTrue(handled)
         self.assertTrue(state.should_exit)
 
     def test_slash_command_model_switch(self):
-        state = SessionState(model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
+        state = SessionState(client=MockClient(), model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command("/model claude-3-5-sonnet", state)
         self.assertTrue(handled)
         self.assertEqual(state.model, "claude-3-5-sonnet")
         self.assertEqual(state.context_window, 200000)
 
+    def test_slash_command_provider_switch(self):
+        state = SessionState(client=MockClient(), model="qwen2.5-coder:7b", provider="local", workdir=self.test_dir, context_window=32768)
+        handled = dispatch_slash_command("/model mock test-mock-model", state)
+        self.assertTrue(handled)
+        self.assertEqual(state.provider, "mock")
+        self.assertEqual(state.model, "test-mock-model")
+
+    def test_slash_command_local_and_mock(self):
+        state = SessionState(client=MockClient(), model="liquid/lfm-2.5-2.6b:free", provider="cloud", workdir=self.test_dir, context_window=128000)
+        # Test switching to local
+        handled = dispatch_slash_command("/local qwen2.5-coder:14b", state)
+        self.assertTrue(handled)
+        self.assertEqual(state.provider, "local")
+        self.assertEqual(state.model, "qwen2.5-coder:14b")
+
+        # Test switching back to mock
+        handled = dispatch_slash_command("/mock", state)
+        self.assertTrue(handled)
+        self.assertEqual(state.provider, "mock")
+        self.assertEqual(state.model, "mock-model")
+
+    def test_fetch_local_models_mocked(self):
+        sample_response = json.dumps({
+            "models": [
+                {"name": "qwen2.5-coder:7b", "size": 4700000000, "modified_at": "2026-08-20T10:00:00Z"},
+                {"name": "deepseek-r1:8b", "size": 5200000000, "modified_at": "2026-08-21T10:00:00Z"},
+            ]
+        }).encode("utf-8")
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = sample_response
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            models = fetch_local_models()
+            self.assertEqual(len(models), 2)
+            self.assertEqual(models[0]["name"], "qwen2.5-coder:7b")
+            self.assertEqual(models[1]["name"], "deepseek-r1:8b")
+
+    def test_slash_command_models_discovery(self):
+        state = SessionState(client=MockClient(), model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        handled = dispatch_slash_command("/models", state)
+        self.assertTrue(handled)
+
     def test_slash_command_cd(self):
         sub_dir = os.path.join(self.test_dir, "sub_folder")
         os.makedirs(sub_dir, exist_ok=True)
-        state = SessionState(model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        state = SessionState(client=MockClient(), model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command(f"/cd {sub_dir}", state)
         self.assertTrue(handled)
         self.assertEqual(state.workdir, sub_dir)
 
     def test_slash_command_clear(self):
         state = SessionState(
+            client=MockClient(),
             model="test-m",
             provider="mock",
             workdir=self.test_dir,
@@ -159,7 +209,7 @@ class TestAtelierSandbox(unittest.TestCase):
         self.assertEqual(state.last_prompt_tokens, 0)
 
     def test_slash_command_approve_toggle(self):
-        state = SessionState(model="test-m", provider="mock", workdir=self.test_dir, context_window=32768, auto_approve=False)
+        state = SessionState(client=MockClient(), model="test-m", provider="mock", workdir=self.test_dir, context_window=32768, auto_approve=False)
         handled = dispatch_slash_command("/approve", state)
         self.assertTrue(handled)
         self.assertTrue(state.auto_approve)
@@ -169,13 +219,13 @@ class TestAtelierSandbox(unittest.TestCase):
         def cmd_ping(state: SessionState, args: str):
             state.model = "pinged"
 
-        state = SessionState(model="original", provider="mock", workdir=self.test_dir, context_window=32768)
+        state = SessionState(client=MockClient(), model="original", provider="mock", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command("/custom_ping", state)
         self.assertTrue(handled)
         self.assertEqual(state.model, "pinged")
 
     def test_slash_command_non_slash_input(self):
-        state = SessionState(model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
+        state = SessionState(client=MockClient(), model="test-m", provider="mock", workdir=self.test_dir, context_window=32768)
         handled = dispatch_slash_command("Read pyproject.toml", state)
         self.assertFalse(handled)
 
