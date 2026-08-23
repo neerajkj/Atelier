@@ -95,6 +95,7 @@ Inside the interactive REPL, you can control Atelier dynamically:
 | :--- | :--- | :--- |
 | **`/models`** *(or `/ls`)* | Discover downloaded local Ollama models & cloud recommendations | `/models` |
 | **`/model [provider] [name]`** | View or switch active model/provider live | `/model local qwen2.5-coder:7b` |
+| **`/compact`** *(or `/compress`)* | Compact older conversation history to reclaim context window | `/compact` |
 | **`/cd [path]`** | Change active working directory without restarting | `/cd ~/projects/my-api` |
 | **`/clear`** *(or `/reset`)* | Clear conversation history and reset context tokens to 0 | `/clear` |
 | **`/stats`** *(or `/context`)* | View active context token usage, model info, and session odometer | `/stats` |

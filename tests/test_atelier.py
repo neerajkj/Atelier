@@ -16,6 +16,8 @@ from atelier.main import (
     fetch_local_models,
     switch_model_and_provider,
     create_client,
+    prune_tool_outputs,
+    compact_context,
 )
 
 
@@ -228,6 +230,93 @@ class TestAtelierSandbox(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ValueError):
                 create_client("cloud")
+
+    def test_prune_tool_outputs_micro_pruning(self):
+        large_tool_output = "\n".join([f"Line {i}: some verbose log output" for i in range(100)])
+        messages = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "run tests"},
+            {"role": "tool", "tool_call_id": "call_1", "content": large_tool_output},
+            {"role": "user", "content": "recent prompt 1"},
+            {"role": "assistant", "content": "recent answer 1"},
+            {"role": "user", "content": "recent prompt 2"},
+            {"role": "assistant", "content": "recent answer 2"},
+        ]
+        pruned = prune_tool_outputs(messages, preserve_last_n=4, max_lines=35)
+        self.assertEqual(pruned, 1)
+        tool_content = messages[2]["content"]
+        self.assertIn("Output truncated", tool_content)
+        self.assertIn("Line 0:", tool_content)
+        self.assertIn("Line 99:", tool_content)
+
+    def test_compact_context_successful(self):
+        # Create mock completion response for compaction
+        mock_choice = MagicMock()
+        mock_choice.message.content = "• Goal: Refactor app\n• Files modified: src/main.py\n• Tests passing."
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+
+        client = MagicMock()
+        client.chat.completions.create.return_value = mock_resp
+
+        messages = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "old task 1"},
+            {"role": "assistant", "content": "old answer 1"},
+            {"role": "user", "content": "old task 2"},
+            {"role": "assistant", "content": "old answer 2"},
+            {"role": "user", "content": "recent task 1"},
+            {"role": "assistant", "content": "recent answer 1"},
+            {"role": "user", "content": "recent task 2"},
+            {"role": "assistant", "content": "recent answer 2"},
+        ]
+        state = SessionState(
+            client=client,
+            model="qwen2.5-coder:7b",
+            provider="local",
+            workdir=self.test_dir,
+            context_window=32768,
+            messages=messages,
+            last_prompt_tokens=26000,
+        )
+
+        success = compact_context(state, hot_zone_turns=2)
+        self.assertTrue(success)
+        # System + Summary User + Assistant Ack + 4 Hot Zone messages = 7 messages
+        self.assertEqual(len(state.messages), 7)
+        self.assertEqual(state.messages[0]["role"], "system")
+        self.assertIn("Summary of previous session context", state.messages[1]["content"])
+        self.assertEqual(state.messages[2]["role"], "assistant")
+        self.assertEqual(state.messages[-1]["content"], "recent answer 2")
+        self.assertLess(state.last_prompt_tokens, 26000)
+
+    def test_slash_command_compact(self):
+        mock_choice = MagicMock()
+        mock_choice.message.content = "Briefing summary."
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+
+        client = MagicMock()
+        client.chat.completions.create.return_value = mock_resp
+
+        state = SessionState(
+            client=client,
+            model="qwen2.5-coder:7b",
+            provider="local",
+            workdir=self.test_dir,
+            context_window=32768,
+            messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "step 1"},
+                {"role": "assistant", "content": "done 1"},
+                {"role": "user", "content": "step 2"},
+                {"role": "assistant", "content": "done 2"},
+            ],
+            last_prompt_tokens=1000,
+        )
+        handled = dispatch_slash_command("/compact", state)
+        self.assertTrue(handled)
+        self.assertTrue(any("Summary of previous session context" in str(m.get("content", "")) for m in state.messages if isinstance(m, dict)))
 
 
 if __name__ == "__main__":

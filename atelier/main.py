@@ -338,6 +338,126 @@ def switch_model_and_provider(state: SessionState, target_provider: str, target_
     print(f"\n✓ Switched to {badge}: {C.BOLD}{state.model}{C.RESET} (Context Limit: {state.context_window:,} tokens)\n")
 
 
+def prune_tool_outputs(messages: list, preserve_last_n: int = 4, max_lines: int = 35) -> int:
+    """Strategy 1 (Micro-Pruning): Truncates giant older tool outputs to head/tail snippets."""
+    pruned_count = 0
+    cutoff = max(0, len(messages) - preserve_last_n)
+    for i in range(cutoff):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get("role") == "tool":
+            content = str(msg.get("content", ""))
+            lines = content.splitlines()
+            if len(lines) > max_lines:
+                head = lines[:15]
+                tail = lines[-10:]
+                omitted = len(lines) - 25
+                marker = f"... [Output truncated: {omitted:,} lines omitted to conserve context] ..."
+                new_content = "\n".join(head + [marker] + tail)
+                msg["content"] = new_content
+                pruned_count += 1
+    return pruned_count
+
+
+def compact_context(state: SessionState, hot_zone_turns: int = 2, force: bool = False) -> bool:
+    """Strategy 2 & 3: 3-Zone Partitioning and Active LLM Summarization."""
+    # 1. Run micro-pruning on older tool responses first
+    prune_tool_outputs(state.messages, preserve_last_n=hot_zone_turns * 2)
+
+    system_msgs = [m for m in state.messages if isinstance(m, dict) and m.get("role") == "system"]
+    work_msgs = [m for m in state.messages if not (isinstance(m, dict) and m.get("role") == "system")]
+
+    min_messages = (hot_zone_turns * 2) + 2
+    if len(work_msgs) < (2 if force else min_messages):
+        return False
+
+    if force and len(work_msgs) < min_messages:
+        split_idx = max(1, len(work_msgs) - 2)
+    else:
+        split_idx = max(0, len(work_msgs) - (hot_zone_turns * 2))
+
+    # Safeguard: ensure split_idx does not sever an assistant tool_calls from its tool responses
+    while split_idx > 0 and split_idx < len(work_msgs):
+        curr = work_msgs[split_idx]
+        if isinstance(curr, dict) and curr.get("role") == "tool":
+            split_idx -= 1
+        else:
+            break
+
+    to_compact = work_msgs[:split_idx]
+    hot_zone = work_msgs[split_idx:]
+
+    if not to_compact:
+        return False
+
+    print(f"\n{C.BOLD_YELLOW}🧠 [Context Optimization] Compacting {len(to_compact)} older messages into structured brief...{C.RESET}", flush=True)
+
+    transcript_lines = []
+    for m in to_compact:
+        if isinstance(m, dict):
+            role = m.get("role", "unknown").upper()
+            content = str(m.get("content", ""))
+            if role == "TOOL":
+                tool_id = m.get("tool_call_id", "")
+                snippet = (content[:250] + "...") if len(content) > 250 else content
+                transcript_lines.append(f"[TOOL RESPONSE ({tool_id})]: {snippet}")
+            else:
+                snippet = (content[:400] + "...") if len(content) > 400 else content
+                transcript_lines.append(f"[{role}]: {snippet}")
+        elif hasattr(m, "role"):
+            role = getattr(m, "role", "assistant").upper()
+            content = getattr(m, "content", "") or ""
+            tool_calls = getattr(m, "tool_calls", None)
+            if tool_calls:
+                tc_names = ", ".join([tc.function.name for tc in tool_calls if hasattr(tc, "function") and hasattr(tc.function, "name")])
+                transcript_lines.append(f"[ASSISTANT TOOL REQUEST]: Called tools: {tc_names}")
+            if content:
+                transcript_lines.append(f"[{role}]: {content[:400]}")
+
+    compaction_prompt = (
+        "You are Atelier's context compaction engine. Summarize the preceding conversation into a concise, high-density briefing.\n"
+        "Preserve:\n"
+        "1. Primary user task/goal\n"
+        "2. Files inspected, created, or modified (with paths)\n"
+        "3. Key technical decisions and solutions implemented\n"
+        "4. Unresolved errors or pending next steps\n"
+        "Be concise (under 200 words). Do not include conversational filler.\n\n"
+        "CONVERSATION TRANSCRIPT:\n" + "\n".join(transcript_lines)
+    )
+
+    try:
+        resp = state.client.chat.completions.create(
+            model=state.model,
+            messages=[{"role": "user", "content": compaction_prompt}],
+            max_tokens=450,
+            stream=False,
+        )
+        if not resp.choices or not resp.choices[0].message.content:
+            return False
+        summary_text = resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"{C.RED}[Context Compaction Failed]{C.RESET} {e}\n")
+        return False
+
+    summary_user_msg = {
+        "role": "user",
+        "content": f"📋 [Summary of previous session context]:\n{summary_text}"
+    }
+    summary_assistant_ack = {
+        "role": "assistant",
+        "content": "Understood. I have absorbed the prior session context, file changes, and active tasks. Ready to continue."
+    }
+
+    old_msg_count = len(state.messages)
+    state.messages = system_msgs + [summary_user_msg, summary_assistant_ack] + hot_zone
+    new_msg_count = len(state.messages)
+
+    if state.last_prompt_tokens > 0:
+        state.last_prompt_tokens = max(int(state.last_prompt_tokens * 0.35), 250)
+
+    print(f"{C.BOLD_GREEN}✓ Context Compacted:{C.RESET} Reduced history from {C.BOLD}{old_msg_count}{C.RESET} ➔ {C.BOLD}{new_msg_count}{C.RESET} messages. Working memory refreshed.\n", flush=True)
+    return True
+
+
 COMMAND_REGISTRY = {}
 
 
@@ -385,6 +505,13 @@ def cmd_clear(state: SessionState, args: str):
     state.messages = [m for m in state.messages if isinstance(m, dict) and m.get("role") == "system"]
     state.last_prompt_tokens = 0
     print(f"{C.GREEN}✓ Conversation history cleared. Context reset to 0 tokens.{C.RESET}\n")
+
+
+@register_command(["/compact", "/compress"], "Compress older conversation history into a brief to reclaim context", usage="/compact")
+def cmd_compact(state: SessionState, args: str):
+    success = compact_context(state, force=True)
+    if not success:
+        print(f"{C.DIM}Conversation history is too short to compact or no older messages were found.{C.RESET}\n")
 
 
 @register_command(["/models", "/ls"], "Discover downloaded Ollama models and cloud recommendations", usage="/models")
@@ -671,6 +798,12 @@ def main():
         # Agent Loop: call model with real-time streaming and execute tools
         try:
             while True:
+                # Active Context Compaction (Auto-trigger when context utilization >= 80%)
+                if state.context_window > 0 and state.last_prompt_tokens > 0:
+                    usage_ratio = state.last_prompt_tokens / state.context_window
+                    if usage_ratio >= 0.80:
+                        compact_context(state)
+
                 params = {
                     "model": state.model,
                     "messages": state.messages,
@@ -799,6 +932,9 @@ def main():
                         "tool_call_id": tool_call.id,
                         "content": result,
                     })
+
+                # Passive Micro-Pruning: truncate large older tool responses
+                prune_tool_outputs(state.messages, preserve_last_n=4)
         except KeyboardInterrupt:
             print(f"\n{C.YELLOW}[Interrupted]{C.RESET} Operation cancelled by user.", flush=True)
             # Remove incomplete user prompt from history
